@@ -41,6 +41,11 @@ const (
 	FCAddressFilePath  = "/etc/kubernetes/fc-addresses"
 )
 
+var (
+	execCommand        = exec.Command
+	execCommandContext = exec.CommandContext
+)
+
 type StorageOperations interface {
 	csi.NodeServer
 	AttachStorage(ctx context.Context, req *csi.NodePublishVolumeRequest) (string, error)
@@ -175,7 +180,7 @@ func FindDeviceFormat(device string) (string, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), BlkidTimeout*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "blkid",
+	output, err := execCommandContext(ctx, "blkid",
 		"-p",
 		"-s", "TYPE",
 		"-s", "PTTYPE",
@@ -221,6 +226,40 @@ func FindDeviceFormat(device string) (string, error) {
 	}
 
 	return filesystemType, nil
+}
+
+func resizeCommandForFs(fsType, devicePath, volumePath string) (string, []string, error) {
+	switch {
+	case fsType == "xfs":
+		return "xfs_growfs", []string{volumePath}, nil
+	case strings.HasPrefix(fsType, "ext"):
+		return "resize2fs", []string{devicePath}, nil
+	case fsType == "":
+		return "", nil, fmt.Errorf("could not determine filesystem type for device %s", devicePath)
+	default:
+		return "", nil, fmt.Errorf("unsupported filesystem %q for resize on device %s", fsType, devicePath)
+	}
+}
+
+func ResizeFilesystem(devicePath, volumePath string) error {
+	fsType, err := FindDeviceFormat(devicePath)
+	if err != nil {
+		return err
+	}
+
+	command, args, err := resizeCommandForFs(fsType, devicePath, volumePath)
+	if err != nil {
+		return err
+	}
+
+	klog.Infof("expanding %s filesystem using %s on device %s", fsType, command, devicePath)
+	output, err := execCommand(command, args...).CombinedOutput()
+	if err != nil {
+		klog.V(2).InfoS("could not resize filesystem", "command", command, "output", output)
+		return fmt.Errorf("could not resize filesystem: %v", output)
+	}
+
+	return nil
 }
 
 // EnsureFsType:
