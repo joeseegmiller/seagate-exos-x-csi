@@ -241,23 +241,64 @@ func resizeCommandForFs(fsType, devicePath, volumePath string) (string, []string
 	}
 }
 
+func exitCodeFromError(err error) int {
+	if err == nil {
+		return 0
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+func runLoggedCommand(name string, args ...string) ([]byte, error) {
+	klog.Infof("Running command: %s %s", name, strings.Join(args, " "))
+	output, err := execCommand(name, args...).CombinedOutput()
+	exitCode := exitCodeFromError(err)
+	klog.Infof("Command output: %s", string(output))
+	klog.Infof("Command exit code: %d", exitCode)
+	if err != nil {
+		klog.Errorf("Command failed: %s %s", name, strings.Join(args, " "))
+		return output, fmt.Errorf("command %s %s failed with exit code %d: %s", name, strings.Join(args, " "), exitCode, string(output))
+	}
+	return output, nil
+}
+
 func ResizeFilesystem(devicePath, volumePath string) error {
 	fsType, err := FindDeviceFormat(devicePath)
 	if err != nil {
+		klog.Errorf("Failed to detect filesystem for device %s: %v", devicePath, err)
 		return err
 	}
+	klog.Infof("Detected filesystem: %s", fsType)
+	klog.Infof("Resize target device path: %s", devicePath)
+	klog.Infof("Resize target mount path: %s", volumePath)
 
 	command, args, err := resizeCommandForFs(fsType, devicePath, volumePath)
 	if err != nil {
+		klog.Errorf("Failed to determine resize command for filesystem %s on device %s with mount path %s: %v", fsType, devicePath, volumePath, err)
 		return err
 	}
 
-	klog.Infof("expanding %s filesystem using %s on device %s", fsType, command, devicePath)
-	output, err := execCommand(command, args...).CombinedOutput()
+	dfBefore, err := runLoggedCommand("df", "-T", volumePath)
 	if err != nil {
-		klog.V(2).InfoS("could not resize filesystem", "command", command, "output", output)
-		return fmt.Errorf("could not resize filesystem: %v", output)
+		klog.Errorf("Failed to collect filesystem state before resize for mount path %s: %v", volumePath, err)
+		return fmt.Errorf("failed to collect filesystem state before resize for %s: %w", volumePath, err)
 	}
+	klog.Infof("Filesystem before resize: %s", string(dfBefore))
+
+	klog.Infof("Expanding %s filesystem using %s", fsType, command)
+	if _, err := runLoggedCommand(command, args...); err != nil {
+		klog.Errorf("Filesystem resize failed for fsType=%s devicePath=%s volumePath=%s: %v", fsType, devicePath, volumePath, err)
+		return fmt.Errorf("could not resize filesystem for fsType=%s devicePath=%s volumePath=%s: %w", fsType, devicePath, volumePath, err)
+	}
+
+	dfAfter, err := runLoggedCommand("df", "-T", volumePath)
+	if err != nil {
+		klog.Errorf("Failed to collect filesystem state after resize for mount path %s: %v", volumePath, err)
+		return fmt.Errorf("failed to collect filesystem state after resize for %s: %w", volumePath, err)
+	}
+	klog.Infof("Filesystem after resize: %s", string(dfAfter))
 
 	return nil
 }
