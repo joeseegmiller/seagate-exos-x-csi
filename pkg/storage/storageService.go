@@ -339,6 +339,7 @@ func isXFSNouuidMountError(output []byte) bool {
 
 func mountTarget(fsType, devicePath, targetPath string) error {
 	args := []string{"-t", fsType, devicePath, targetPath}
+	klog.Infof("Running mount command: mount %s", strings.Join(args, " "))
 	out, err := execCommand("mount", args...).CombinedOutput()
 	if err == nil {
 		return nil
@@ -350,6 +351,7 @@ func mountTarget(fsType, devicePath, targetPath string) error {
 
 	klog.Infof("xfs mount failed with duplicate UUID signature for %s, retrying with nouuid", devicePath)
 	retryArgs := []string{"-t", fsType, "-o", "nouuid", devicePath, targetPath}
+	klog.Infof("Running mount command: mount %s", strings.Join(retryArgs, " "))
 	retryOut, retryErr := execCommand("mount", retryArgs...).CombinedOutput()
 	if retryErr != nil {
 		errStr := fmt.Sprintf("%s; xfs retry with nouuid failed: %s", strings.TrimSpace(string(out)), strings.TrimSpace(string(retryOut)))
