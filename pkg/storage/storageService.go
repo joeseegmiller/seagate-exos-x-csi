@@ -46,10 +46,21 @@ var (
 	execCommand        = exec.Command
 	execCommandContext = exec.CommandContext
 	readDir            = os.ReadDir
+	readFile           = os.ReadFile
 	evalSymlinks       = filepath.EvalSymlinks
 )
 
 const diskByIDPath = "/dev/disk/by-id"
+
+func normalizeWWN(wwn string) string {
+	wwn = strings.ToLower(strings.TrimSpace(wwn))
+	wwn = strings.TrimPrefix(wwn, "mpath-")
+	wwn = strings.TrimPrefix(wwn, "dm-name-")
+	if strings.HasPrefix(wwn, "3") {
+		wwn = strings.TrimPrefix(wwn, "3")
+	}
+	return wwn
+}
 
 type StorageOperations interface {
 	csi.NodeServer
@@ -213,6 +224,15 @@ func resolveDeviceWWN(devicePath string) (string, error) {
 		return "", fmt.Errorf("failed to resolve device path %s: %w", devicePath, err)
 	}
 
+	dmName := filepath.Base(resolvedDevicePath)
+	if strings.HasPrefix(dmName, "dm-") {
+		sysfsUUIDPath := filepath.Join("/sys/block", dmName, "dm", "uuid")
+		uuidBytes, err := readFile(sysfsUUIDPath)
+		if err == nil {
+			return normalizeWWN(string(uuidBytes)), nil
+		}
+	}
+
 	entries, err := readDir(diskByIDPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read %s: %w", diskByIDPath, err)
@@ -231,7 +251,7 @@ func resolveDeviceWWN(devicePath string) (string, error) {
 		}
 
 		if resolvedByIDPath == resolvedDevicePath {
-			return strings.TrimPrefix(name, "dm-name-3"), nil
+			return normalizeWWN(name), nil
 		}
 	}
 
@@ -245,6 +265,7 @@ func ValidateAttachedDeviceWWN(volumeName, devicePath, expectedWWN string) error
 		return err
 	}
 
+	expectedWWN = normalizeWWN(expectedWWN)
 	klog.Infof("Attached device validation: volumeName=%s devicePath=%s resolvedWWN=%s expectedWWN=%s", volumeName, devicePath, resolvedWWN, expectedWWN)
 	if resolvedWWN != expectedWWN {
 		err := fmt.Errorf("attached device WWN mismatch for volume %s: expected %s, got %s for %s", volumeName, expectedWWN, resolvedWWN, devicePath)
