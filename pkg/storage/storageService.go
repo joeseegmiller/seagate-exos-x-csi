@@ -152,7 +152,7 @@ func CheckFs(path string, fstype string, context string) error {
 		fsRepairCommand = "xfs_repair"
 	}
 	klog.Infof("Checking filesystem (%s -n %s) [%s]", fsRepairCommand, path, context)
-	if out, err := exec.Command(fsRepairCommand, "-n", path).CombinedOutput(); err != nil {
+	if out, err := execCommand(fsRepairCommand, "-n", path).CombinedOutput(); err != nil {
 		return errors.New(string(out))
 	}
 	return nil
@@ -303,6 +303,35 @@ func ResizeFilesystem(devicePath, volumePath string) error {
 	return nil
 }
 
+func isXFSNouuidMountError(output []byte) bool {
+	message := strings.ToLower(string(output))
+	return strings.Contains(message, "filesystem has duplicate uuid") &&
+		strings.Contains(message, "can't mount")
+}
+
+func mountTarget(fsType, devicePath, targetPath string) error {
+	args := []string{"-t", fsType, devicePath, targetPath}
+	out, err := execCommand("mount", args...).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+
+	if fsType != "xfs" || !isXFSNouuidMountError(out) {
+		return status.Error(codes.Internal, string(out))
+	}
+
+	klog.Infof("xfs mount failed with duplicate UUID signature for %s, retrying with nouuid", devicePath)
+	retryArgs := []string{"-t", fsType, "-o", "nouuid", devicePath, targetPath}
+	retryOut, retryErr := execCommand("mount", retryArgs...).CombinedOutput()
+	if retryErr != nil {
+		errStr := fmt.Sprintf("%s; xfs retry with nouuid failed: %s", strings.TrimSpace(string(out)), strings.TrimSpace(string(retryOut)))
+		return status.Error(codes.Internal, errStr)
+	}
+
+	klog.InfoS("successfully mounted xfs volume with nouuid", "devicePath", devicePath, "targetPath", targetPath)
+	return nil
+}
+
 // EnsureFsType:
 func EnsureFsType(fsType string, disk string) error {
 	currentFsType, err := FindDeviceFormat(disk)
@@ -317,7 +346,7 @@ func EnsureFsType(fsType string, disk string) error {
 		}
 
 		klog.Infof("Creating %s filesystem on device %s", fsType, disk)
-		out, err := exec.Command(fmt.Sprintf("mkfs.%s", fsType), disk).CombinedOutput()
+		out, err := execCommand(fmt.Sprintf("mkfs.%s", fsType), disk).CombinedOutput()
 		if err != nil {
 			return errors.New(string(out))
 		}
@@ -337,7 +366,7 @@ func MountFilesystem(req *csi.NodePublishVolumeRequest, path string) error {
 		return err
 	}
 
-	out, err := exec.Command("findmnt", "--output", "TARGET", "--noheadings", path).Output()
+	out, err := execCommand("findmnt", "--output", "TARGET", "--noheadings", path).Output()
 	mountpoints := strings.Split(strings.Trim(string(out), "\n"), "\n")
 	if err != nil || len(mountpoints) == 0 {
 		klog.V(1).InfoS("mount", "command", fmt.Sprintf("mount -t %s %s %s", fsType, path, req.GetTargetPath()))
@@ -345,9 +374,8 @@ func MountFilesystem(req *csi.NodePublishVolumeRequest, path string) error {
 		if _, err = os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			klog.InfoS("targetpath does not exist", "targetPath", req.GetTargetPath())
 		}
-		out, err = exec.Command("mount", "-t", fsType, path, req.GetTargetPath()).CombinedOutput()
-		if err != nil {
-			return status.Error(codes.Internal, string(out))
+		if err = mountTarget(fsType, path, req.GetTargetPath()); err != nil {
+			return err
 		}
 	} else if len(mountpoints) == 1 {
 		if mountpoints[0] == req.GetTargetPath() {
