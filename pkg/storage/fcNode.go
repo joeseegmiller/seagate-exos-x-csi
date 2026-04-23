@@ -56,13 +56,17 @@ func (fc *fcStorage) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 func (fc *fcStorage) AttachStorage(ctx context.Context, req *csi.NodePublishVolumeRequest) (string, error) {
 	CheckPreviouslyRemovedDevices(ctx)
 	klog.InfoS("initiating FC connection...")
+	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
 	wwn, _ := common.VolumeIdGetWwn(req.GetVolumeId())
 	connector := &fclib.Connector{VolumeWWN: wwn}
 	path, err := fclib.Attach(ctx, connector, &fclib.OSioHandler{})
 	if err != nil {
 		return path, err
 	}
-	klog.InfoS("attached device", "path", path)
+	klog.InfoS("attached device", "volumeName", volumeName, "path", path, "expectedWWN", wwn)
+	if err := ValidateAttachedDeviceWWN(volumeName, path, wwn); err != nil {
+		return path, status.Error(codes.Internal, err.Error())
+	}
 	err = connector.Persist(ctx, fc.connectorInfoPath)
 	return path, err
 }

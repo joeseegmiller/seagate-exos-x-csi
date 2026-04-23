@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -602,5 +604,73 @@ func TestStorageCommandHelper(t *testing.T) {
 		os.Exit(2)
 	default:
 		t.Fatalf("unexpected helper exit code: %s", args[commandIndex])
+	}
+}
+
+type fakeDirEntry string
+
+func (f fakeDirEntry) Name() string               { return string(f) }
+func (f fakeDirEntry) IsDir() bool                { return false }
+func (f fakeDirEntry) Type() fs.FileMode          { return 0 }
+func (f fakeDirEntry) Info() (fs.FileInfo, error) { return nil, nil }
+
+func TestValidateAttachedDeviceWWNSucceeds(t *testing.T) {
+	originalReadDir := readDir
+	originalEvalSymlinks := evalSymlinks
+	t.Cleanup(func() {
+		readDir = originalReadDir
+		evalSymlinks = originalEvalSymlinks
+	})
+
+	readDir = func(name string) ([]os.DirEntry, error) {
+		return []os.DirEntry{
+			fakeDirEntry("dm-name-3000c500abcd1234"),
+			fakeDirEntry("dm-name-3000c500ffff9999"),
+		}, nil
+	}
+	evalSymlinks = func(path string) (string, error) {
+		switch path {
+		case "/dev/dm-11":
+			return "/dev/dm-11", nil
+		case filepath.Join(diskByIDPath, "dm-name-3000c500abcd1234"):
+			return "/dev/dm-11", nil
+		case filepath.Join(diskByIDPath, "dm-name-3000c500ffff9999"):
+			return "/dev/dm-12", nil
+		default:
+			return "", fmt.Errorf("unexpected path %s", path)
+		}
+	}
+
+	if err := ValidateAttachedDeviceWWN("vol-a", "/dev/dm-11", "000c500abcd1234"); err != nil {
+		t.Fatalf("ValidateAttachedDeviceWWN returned error: %v", err)
+	}
+}
+
+func TestValidateAttachedDeviceWWNFailsOnMismatch(t *testing.T) {
+	originalReadDir := readDir
+	originalEvalSymlinks := evalSymlinks
+	t.Cleanup(func() {
+		readDir = originalReadDir
+		evalSymlinks = originalEvalSymlinks
+	})
+
+	readDir = func(name string) ([]os.DirEntry, error) {
+		return []os.DirEntry{
+			fakeDirEntry("dm-name-3000c500ffff9999"),
+		}, nil
+	}
+	evalSymlinks = func(path string) (string, error) {
+		switch path {
+		case "/dev/dm-11":
+			return "/dev/dm-11", nil
+		case filepath.Join(diskByIDPath, "dm-name-3000c500ffff9999"):
+			return "/dev/dm-11", nil
+		default:
+			return "", fmt.Errorf("unexpected path %s", path)
+		}
+	}
+
+	if err := ValidateAttachedDeviceWWN("vol-b", "/dev/dm-11", "000c500abcd1234"); err == nil {
+		t.Fatal("expected WWN mismatch error")
 	}
 }

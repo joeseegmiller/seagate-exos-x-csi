@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -44,7 +45,11 @@ const (
 var (
 	execCommand        = exec.Command
 	execCommandContext = exec.CommandContext
+	readDir            = os.ReadDir
+	evalSymlinks       = filepath.EvalSymlinks
 )
+
+const diskByIDPath = "/dev/disk/by-id"
 
 type StorageOperations interface {
 	csi.NodeServer
@@ -199,6 +204,54 @@ func CheckPreviouslyRemovedDevices(ctx context.Context) error {
 			saslib.Detach(ctx, dm, &saslib.OSioHandler{})
 		}
 	}
+	return nil
+}
+
+func resolveDeviceWWN(devicePath string) (string, error) {
+	resolvedDevicePath, err := evalSymlinks(devicePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve device path %s: %w", devicePath, err)
+	}
+
+	entries, err := readDir(diskByIDPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s: %w", diskByIDPath, err)
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "dm-name-3") {
+			continue
+		}
+
+		byIDPath := filepath.Join(diskByIDPath, name)
+		resolvedByIDPath, err := evalSymlinks(byIDPath)
+		if err != nil {
+			continue
+		}
+
+		if resolvedByIDPath == resolvedDevicePath {
+			return strings.TrimPrefix(name, "dm-name-3"), nil
+		}
+	}
+
+	return "", fmt.Errorf("failed to resolve WWN for device path %s", devicePath)
+}
+
+func ValidateAttachedDeviceWWN(volumeName, devicePath, expectedWWN string) error {
+	resolvedWWN, err := resolveDeviceWWN(devicePath)
+	if err != nil {
+		klog.Errorf("Failed to resolve attached device WWN: volumeName=%s devicePath=%s expectedWWN=%s err=%v", volumeName, devicePath, expectedWWN, err)
+		return err
+	}
+
+	klog.Infof("Attached device validation: volumeName=%s devicePath=%s resolvedWWN=%s expectedWWN=%s", volumeName, devicePath, resolvedWWN, expectedWWN)
+	if resolvedWWN != expectedWWN {
+		err := fmt.Errorf("attached device WWN mismatch for volume %s: expected %s, got %s for %s", volumeName, expectedWWN, resolvedWWN, devicePath)
+		klog.Errorf("%v", err)
+		return err
+	}
+
 	return nil
 }
 
