@@ -296,6 +296,7 @@ func TestMountFilesystemRetriesXFSWithNouuidOnDuplicateUUID(t *testing.T) {
 	want := [][]string{
 		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-2"},
 		{"xfs_repair", "-n", "/dev/dm-2"},
+		{"xfs_repair", "-n", "/dev/dm-2"},
 		{"findmnt", "--output", "TARGET", "--noheadings", "/dev/dm-2"},
 		{"mount", "-t", "xfs", "/dev/dm-2", "/target"},
 		{"mount", "-t", "xfs", "-o", "nouuid", "/dev/dm-2", "/target"},
@@ -352,6 +353,7 @@ func TestMountFilesystemDoesNotRetryXFSForNonDuplicateUUIDFailure(t *testing.T) 
 	want := [][]string{
 		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-4"},
 		{"xfs_repair", "-n", "/dev/dm-4"},
+		{"xfs_repair", "-n", "/dev/dm-4"},
 		{"findmnt", "--output", "TARGET", "--noheadings", "/dev/dm-4"},
 		{"mount", "-t", "xfs", "/dev/dm-4", "/target"},
 	}
@@ -407,8 +409,126 @@ func TestMountFilesystemDoesNotRetryExt4MountFailures(t *testing.T) {
 	want := [][]string{
 		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-3"},
 		{"e2fsck", "-n", "/dev/dm-3"},
+		{"e2fsck", "-n", "/dev/dm-3"},
 		{"findmnt", "--output", "TARGET", "--noheadings", "/dev/dm-3"},
 		{"mount", "-t", "ext4", "/dev/dm-3", "/target"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %v, want %v", commands, want)
+	}
+}
+
+func TestEnsureFsTypeRecreatesInvalidDetectedXFS(t *testing.T) {
+	originalExecCommand := execCommand
+	originalExecCommandContext := execCommandContext
+	t.Cleanup(func() {
+		execCommand = originalExecCommand
+		execCommandContext = originalExecCommandContext
+	})
+
+	var commands [][]string
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		commands = append(commands, append([]string{name}, args...))
+		return helperCommand(t, 0, "TYPE=xfs\n")
+	}
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		command := append([]string{name}, args...)
+		commands = append(commands, command)
+		switch {
+		case reflect.DeepEqual(command, []string{"xfs_repair", "-n", "/dev/dm-5"}):
+			return helperCommand(t, 1, "bad primary superblock")
+		case reflect.DeepEqual(command, []string{"mkfs.xfs", "/dev/dm-5"}):
+			return helperCommand(t, 0, "formatted")
+		default:
+			t.Fatalf("unexpected command: %v", command)
+			return nil
+		}
+	}
+
+	if err := EnsureFsType("xfs", "/dev/dm-5"); err != nil {
+		t.Fatalf("EnsureFsType returned error: %v", err)
+	}
+
+	want := [][]string{
+		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-5"},
+		{"xfs_repair", "-n", "/dev/dm-5"},
+		{"mkfs.xfs", "/dev/dm-5"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %v, want %v", commands, want)
+	}
+}
+
+func TestEnsureFsTypeKeepsValidDetectedXFS(t *testing.T) {
+	originalExecCommand := execCommand
+	originalExecCommandContext := execCommandContext
+	t.Cleanup(func() {
+		execCommand = originalExecCommand
+		execCommandContext = originalExecCommandContext
+	})
+
+	var commands [][]string
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		commands = append(commands, append([]string{name}, args...))
+		return helperCommand(t, 0, "TYPE=xfs\n")
+	}
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		command := append([]string{name}, args...)
+		commands = append(commands, command)
+		switch {
+		case reflect.DeepEqual(command, []string{"xfs_repair", "-n", "/dev/dm-6"}):
+			return helperCommand(t, 0, "ok")
+		default:
+			t.Fatalf("unexpected command: %v", command)
+			return nil
+		}
+	}
+
+	if err := EnsureFsType("xfs", "/dev/dm-6"); err != nil {
+		t.Fatalf("EnsureFsType returned error: %v", err)
+	}
+
+	want := [][]string{
+		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-6"},
+		{"xfs_repair", "-n", "/dev/dm-6"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %v, want %v", commands, want)
+	}
+}
+
+func TestEnsureFsTypeKeepsValidDetectedExt4(t *testing.T) {
+	originalExecCommand := execCommand
+	originalExecCommandContext := execCommandContext
+	t.Cleanup(func() {
+		execCommand = originalExecCommand
+		execCommandContext = originalExecCommandContext
+	})
+
+	var commands [][]string
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		commands = append(commands, append([]string{name}, args...))
+		return helperCommand(t, 0, "TYPE=ext4\n")
+	}
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		command := append([]string{name}, args...)
+		commands = append(commands, command)
+		switch {
+		case reflect.DeepEqual(command, []string{"e2fsck", "-n", "/dev/dm-7"}):
+			return helperCommand(t, 0, "ok")
+		default:
+			t.Fatalf("unexpected command: %v", command)
+			return nil
+		}
+	}
+
+	if err := EnsureFsType("ext4", "/dev/dm-7"); err != nil {
+		t.Fatalf("EnsureFsType returned error: %v", err)
+	}
+
+	want := [][]string{
+		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-7"},
+		{"e2fsck", "-n", "/dev/dm-7"},
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %v, want %v", commands, want)

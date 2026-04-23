@@ -158,6 +158,34 @@ func CheckFs(path string, fstype string, context string) error {
 	return nil
 }
 
+func filesystemValidator(fsType string) string {
+	if fsType == "xfs" {
+		return "xfs_repair"
+	}
+	if strings.HasPrefix(fsType, "ext") {
+		return "e2fsck"
+	}
+	return ""
+}
+
+func isValidFilesystem(fsType, devicePath string) bool {
+	validator := filesystemValidator(fsType)
+	if validator == "" {
+		klog.Infof("No filesystem validator available for %s on device %s; treating detected filesystem as valid", fsType, devicePath)
+		return true
+	}
+
+	klog.Infof("Validating detected %s filesystem on device %s with %s -n", fsType, devicePath, validator)
+	out, err := execCommand(validator, "-n", devicePath).CombinedOutput()
+	if err != nil {
+		klog.Infof("Filesystem validation failed for %s on device %s: %s", fsType, devicePath, strings.TrimSpace(string(out)))
+		return false
+	}
+
+	klog.Infof("Filesystem validation succeeded for %s on device %s", fsType, devicePath)
+	return true
+}
+
 // Check for and remove any rediscovered iscsi devices that were previously unmapped
 // This is a common function for SAS and FC
 func CheckPreviouslyRemovedDevices(ctx context.Context) error {
@@ -339,17 +367,25 @@ func EnsureFsType(fsType string, disk string) error {
 		return err
 	}
 
-	klog.V(1).Infof("Detected filesystem: %q", currentFsType)
-	if currentFsType != fsType {
-		if currentFsType != "" {
-			return fmt.Errorf("Could not create %s filesystem on device %s since it already has one (%s)", fsType, disk, currentFsType)
+	klog.Infof("Detected filesystem from blkid on device %s: %q", disk, currentFsType)
+	switch {
+	case currentFsType == "":
+		klog.Infof("Device %s is unformatted; creating %s filesystem", disk, fsType)
+	case currentFsType != fsType:
+		return fmt.Errorf("Could not create %s filesystem on device %s since it already has one (%s)", fsType, disk, currentFsType)
+	default:
+		valid := isValidFilesystem(fsType, disk)
+		klog.Infof("Filesystem validation result for %s on device %s: %t", fsType, disk, valid)
+		if valid {
+			return nil
 		}
+		klog.Infof("Detected %s filesystem on device %s is invalid; recreating filesystem", fsType, disk)
+	}
 
-		klog.Infof("Creating %s filesystem on device %s", fsType, disk)
-		out, err := execCommand(fmt.Sprintf("mkfs.%s", fsType), disk).CombinedOutput()
-		if err != nil {
-			return errors.New(string(out))
-		}
+	klog.Infof("Creating %s filesystem on device %s", fsType, disk)
+	out, err := execCommand(fmt.Sprintf("mkfs.%s", fsType), disk).CombinedOutput()
+	if err != nil {
+		return errors.New(string(out))
 	}
 
 	return nil
