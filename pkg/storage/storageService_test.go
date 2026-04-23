@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -602,5 +604,114 @@ func TestStorageCommandHelper(t *testing.T) {
 		os.Exit(2)
 	default:
 		t.Fatalf("unexpected helper exit code: %s", args[commandIndex])
+	}
+}
+
+type fakeDirEntry string
+
+func (f fakeDirEntry) Name() string               { return string(f) }
+func (f fakeDirEntry) IsDir() bool                { return false }
+func (f fakeDirEntry) Type() fs.FileMode          { return 0 }
+func (f fakeDirEntry) Info() (fs.FileInfo, error) { return nil, nil }
+
+func TestValidateAttachedDeviceWWNSucceedsFromSysfs(t *testing.T) {
+	originalReadDir := readDir
+	originalReadFile := readFile
+	originalEvalSymlinks := evalSymlinks
+	t.Cleanup(func() {
+		readDir = originalReadDir
+		readFile = originalReadFile
+		evalSymlinks = originalEvalSymlinks
+	})
+
+	readDir = func(name string) ([]os.DirEntry, error) {
+		t.Fatalf("readDir should not be called when sysfs uuid is available")
+		return nil, nil
+	}
+	readFile = func(name string) ([]byte, error) {
+		if name == filepath.Join("/sys/block", "dm-11", "dm", "uuid") {
+			return []byte("mpath-3000c500abcd1234\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected path %s", name)
+	}
+	evalSymlinks = func(path string) (string, error) {
+		switch path {
+		case "/dev/dm-11":
+			return "/dev/dm-11", nil
+		default:
+			return "", fmt.Errorf("unexpected path %s", path)
+		}
+	}
+
+	if err := ValidateAttachedDeviceWWN("vol-a", "/dev/dm-11", "000c500abcd1234"); err != nil {
+		t.Fatalf("ValidateAttachedDeviceWWN returned error: %v", err)
+	}
+}
+
+func TestValidateAttachedDeviceWWNFailsOnMismatch(t *testing.T) {
+	originalReadDir := readDir
+	originalReadFile := readFile
+	originalEvalSymlinks := evalSymlinks
+	t.Cleanup(func() {
+		readDir = originalReadDir
+		readFile = originalReadFile
+		evalSymlinks = originalEvalSymlinks
+	})
+
+	readFile = func(name string) ([]byte, error) {
+		if name == filepath.Join("/sys/block", "dm-11", "dm", "uuid") {
+			return []byte("mpath-3000c500ffff9999\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected path %s", name)
+	}
+	readDir = func(name string) ([]os.DirEntry, error) {
+		t.Fatalf("readDir should not be called when sysfs uuid is available")
+		return nil, nil
+	}
+	evalSymlinks = func(path string) (string, error) {
+		switch path {
+		case "/dev/dm-11":
+			return "/dev/dm-11", nil
+		default:
+			return "", fmt.Errorf("unexpected path %s", path)
+		}
+	}
+
+	if err := ValidateAttachedDeviceWWN("vol-b", "/dev/dm-11", "000c500abcd1234"); err == nil {
+		t.Fatal("expected WWN mismatch error")
+	}
+}
+
+func TestValidateAttachedDeviceWWNFallsBackToDiskByID(t *testing.T) {
+	originalReadDir := readDir
+	originalReadFile := readFile
+	originalEvalSymlinks := evalSymlinks
+	t.Cleanup(func() {
+		readDir = originalReadDir
+		readFile = originalReadFile
+		evalSymlinks = originalEvalSymlinks
+	})
+
+	readFile = func(name string) ([]byte, error) {
+		return nil, fmt.Errorf("missing %s", name)
+	}
+	readDir = func(name string) ([]os.DirEntry, error) {
+		return []os.DirEntry{
+			fakeDirEntry("dm-name-3000c500abcd1234"),
+		}, nil
+	}
+	evalSymlinks = func(path string) (string, error) {
+		switch path {
+		case "/dev/dm-11":
+			return "/dev/dm-11", nil
+		case filepath.Join(diskByIDPath, "dm-name-3000c500abcd1234"):
+			return "/dev/dm-11", nil
+		default:
+			return "", fmt.Errorf("unexpected path %s", path)
+		}
+	}
+
+	if err := ValidateAttachedDeviceWWN("vol-c", "/dev/dm-11", "000c500abcd1234"); err != nil {
+		t.Fatalf("ValidateAttachedDeviceWWN returned error: %v", err)
 	}
 }

@@ -56,13 +56,33 @@ func (fc *fcStorage) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 func (fc *fcStorage) AttachStorage(ctx context.Context, req *csi.NodePublishVolumeRequest) (string, error) {
 	CheckPreviouslyRemovedDevices(ctx)
 	klog.InfoS("initiating FC connection...")
+	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
 	wwn, _ := common.VolumeIdGetWwn(req.GetVolumeId())
 	connector := &fclib.Connector{VolumeWWN: wwn}
 	path, err := fclib.Attach(ctx, connector, &fclib.OSioHandler{})
 	if err != nil {
 		return path, err
 	}
-	klog.InfoS("attached device", "path", path)
+	klog.InfoS("attached device", "volumeName", volumeName, "path", path, "expectedWWN", wwn)
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := ValidateAttachedDeviceWWN(volumeName, path, wwn); err == nil {
+			connector.OSPathName = path
+			break
+		} else if attempt == 3 {
+			return path, status.Error(codes.Internal, err.Error())
+		} else {
+			klog.Errorf("Attached device validation failed on attempt %d: volumeName=%s devicePath=%s expectedWWN=%s err=%v", attempt, volumeName, path, wwn, err)
+			discoveredMpathName, devices := fclib.FindDiskById(klog.FromContext(ctx), wwn, &fclib.OSioHandler{})
+			if discoveredMpathName != "" {
+				klog.Infof("Retrying FC device validation with rediscovered device: volumeName=%s oldDevicePath=%s newDevicePath=%s expectedWWN=%s", volumeName, path, discoveredMpathName, wwn)
+				path = discoveredMpathName
+				connector.OSPathName = discoveredMpathName
+				connector.OSDevicePaths = devices
+				connector.Multipath = len(devices) > 0
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
 	err = connector.Persist(ctx, fc.connectorInfoPath)
 	return path, err
 }
