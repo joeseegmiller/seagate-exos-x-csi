@@ -344,6 +344,11 @@ func mountTarget(fsType, devicePath, targetPath string) error {
 	if err == nil {
 		return nil
 	}
+	klog.Errorf("Mount failed: cmd='mount %s' err='%v' output='%s'",
+		strings.Join(args, " "),
+		err,
+		strings.TrimSpace(string(out)),
+	)
 
 	if fsType != "xfs" || !isXFSNouuidMountError(out) {
 		return status.Error(codes.Internal, string(out))
@@ -354,6 +359,11 @@ func mountTarget(fsType, devicePath, targetPath string) error {
 	klog.Infof("Running mount command: mount %s", strings.Join(retryArgs, " "))
 	retryOut, retryErr := execCommand("mount", retryArgs...).CombinedOutput()
 	if retryErr != nil {
+		klog.Errorf("Mount retry failed: cmd='mount %s' err='%v' output='%s'",
+			strings.Join(retryArgs, " "),
+			retryErr,
+			strings.TrimSpace(string(retryOut)),
+		)
 		errStr := fmt.Sprintf("%s; xfs retry with nouuid failed: %s", strings.TrimSpace(string(out)), strings.TrimSpace(string(retryOut)))
 		return status.Error(codes.Internal, errStr)
 	}
