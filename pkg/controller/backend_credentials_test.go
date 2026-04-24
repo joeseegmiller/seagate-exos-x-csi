@@ -133,13 +133,13 @@ func TestListSnapshotsResolvesBackendCredentialsWithoutRequestSecrets(t *testing
 		configuredCredentials = append(configuredCredentials, credentials)
 		return nil
 	}
-	controller.showSnapshotsFn = func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, *storageapitypes.Status, error) {
+	controller.showSnapshotsFn = func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
 		if snapshotID != "snap-002" {
 			t.Fatalf("showSnapshotsFn got snapshotID=%q, want snap-002", snapshotID)
 		}
 		return []storageapitypes.SnapshotObject{
 			{ObjectName: "snapshot", Name: "snap-002", MasterVolumeName: "vol-a"},
-		}, nil, nil
+		}, nil
 	}
 
 	resp, err := controller.ListSnapshots(nil, &csi.ListSnapshotsRequest{SnapshotId: "backend-b|snap-002"})
@@ -168,9 +168,9 @@ func TestCreateSnapshotFailsWithoutBackendIDInMultiBackendMode(t *testing.T) {
 		},
 		configureClientFn: func(credentials map[string]string) error { return nil },
 	}
-	controller.createSnapshotFn = func(sourceVolumeID, snapshotName string) (*storageapitypes.Status, error) {
+	controller.createSnapshotFn = func(sourceVolumeID, snapshotName string) error {
 		t.Fatal("createSnapshotFn should not be called without backendID")
-		return nil, nil
+		return nil
 	}
 
 	_, err := controller.CreateSnapshot(nil, &csi.CreateSnapshotRequest{
@@ -192,7 +192,7 @@ func TestListSnapshotsRejectsMalformedSnapshotID(t *testing.T) {
 			"backend-a": {APIAddress: "https://array-a", Username: "user-a", Password: "pass-a"},
 		},
 		configureClientFn: func(credentials map[string]string) error { return nil },
-		showSnapshotsFn:   func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, *storageapitypes.Status, error) { return nil, nil, nil },
+		showSnapshotsFn:   func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) { return nil, nil },
 	}
 
 	_, err := controller.ListSnapshots(nil, &csi.ListSnapshotsRequest{SnapshotId: "backend-a|snap|bad"})
@@ -211,7 +211,7 @@ func TestListSnapshotsWithoutSnapshotIDIsUnimplementedForMultiBackend(t *testing
 			"backend-b": {APIAddress: "https://array-b", Username: "user-b", Password: "pass-b"},
 		},
 		configureClientFn: func(credentials map[string]string) error { return nil },
-		showSnapshotsFn:   func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, *storageapitypes.Status, error) { return nil, nil, nil },
+		showSnapshotsFn:   func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) { return nil, nil },
 	}
 
 	_, err := controller.ListSnapshots(nil, &csi.ListSnapshotsRequest{})

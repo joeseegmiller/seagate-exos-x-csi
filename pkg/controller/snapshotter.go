@@ -45,13 +45,13 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 
-	respStatus, err := controller.createSnapshotFn(sourceVolumeId, snapshotName)
-	if err != nil && respStatus.ReturnCode != storageapitypes.SnapshotAlreadyExists {
+	err = controller.createSnapshotFn(sourceVolumeId, snapshotName)
+	if err != nil {
 		return nil, err
 	}
 
 	// The expectation is that show snapshots will return a single array item for the snapshot created
-	snapshots, _, err := controller.showSnapshotsFn(snapshotName, "")
+	snapshots, err := controller.showSnapshotsFn(snapshotName, "")
 	if err != nil {
 		return nil, err
 	}
@@ -91,9 +91,9 @@ func (controller *Controller) DeleteSnapshot(ctx context.Context, req *csi.Delet
 		return nil, err
 	}
 
-	status, err := controller.deleteSnapshotFn(backendSnapshotID)
+	err = controller.deleteSnapshotFn(backendSnapshotID)
 	if err != nil {
-		if status != nil && status.ReturnCode == storageapitypes.SnapshotNotFoundErrorCode {
+		if status.Code(err) == codes.NotFound {
 			klog.Infof("snapshot %s does not exist, assuming it has already been deleted", req.SnapshotId)
 			return &csi.DeleteSnapshotResponse{}, nil
 		}
@@ -210,11 +210,8 @@ func (controller *Controller) listSnapshotEntriesForBackend(backendID, snapshotI
 		return nil, err
 	}
 
-	response, respStatus, err := controller.showSnapshotsFn(snapshotID, sourceVolumeId)
+	response, err := controller.showSnapshotsFn(snapshotID, sourceVolumeId)
 	if err != nil {
-		if respStatus != nil && respStatus.ReturnCode == storageapitypes.BadInputParam {
-			return []*csi.ListSnapshotsResponse_Entry{}, nil
-		}
 		return nil, err
 	}
 

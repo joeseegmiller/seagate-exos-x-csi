@@ -66,9 +66,9 @@ type Controller struct {
 	backendConfigs     map[string]BackendConfig
 	backendConfigErr   error
 	configureClientFn  func(credentials map[string]string) error
-	showSnapshotsFn    func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, *storageapitypes.Status, error)
-	createSnapshotFn   func(sourceVolumeID, snapshotName string) (*storageapitypes.Status, error)
-	deleteSnapshotFn   func(snapshotID string) (*storageapitypes.Status, error)
+	showSnapshotsFn    func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error)
+	createSnapshotFn   func(sourceVolumeID, snapshotName string) error
+	deleteSnapshotFn   func(snapshotID string) error
 }
 
 // DriverCtx contains data common to most calls
@@ -89,9 +89,36 @@ func New() *Controller {
 	}
 	controller.backendConfigs, controller.backendConfigErr = loadBackendConfigsFromFile(os.Getenv(common.ControllerBackendConfigFileEnvVar))
 	controller.configureClientFn = controller.configureClient
-	controller.showSnapshotsFn = controller.client.ShowSnapshots
-	controller.createSnapshotFn = controller.client.CreateSnapshot
-	controller.deleteSnapshotFn = controller.client.DeleteSnapshot
+	controller.showSnapshotsFn = func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
+		response, respStatus, err := controller.client.ShowSnapshots(snapshotID, sourceVolumeID)
+		if err != nil {
+			if respStatus != nil && respStatus.ReturnCode == storageapitypes.BadInputParam {
+				return []storageapitypes.SnapshotObject{}, nil
+			}
+			return nil, err
+		}
+		return response, nil
+	}
+	controller.createSnapshotFn = func(sourceVolumeID, snapshotName string) error {
+		respStatus, err := controller.client.CreateSnapshot(sourceVolumeID, snapshotName)
+		if err != nil {
+			if respStatus != nil && respStatus.ReturnCode == storageapitypes.SnapshotAlreadyExists {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	controller.deleteSnapshotFn = func(snapshotID string) error {
+		respStatus, err := controller.client.DeleteSnapshot(snapshotID)
+		if err != nil {
+			if respStatus != nil && respStatus.ReturnCode == storageapitypes.SnapshotNotFoundErrorCode {
+				return status.Error(codes.NotFound, err.Error())
+			}
+			return err
+		}
+		return nil
+	}
 	if controller.backendConfigErr != nil {
 		klog.ErrorS(controller.backendConfigErr, "failed to load controller backend credentials")
 	} else if len(controller.backendConfigs) > 0 {
