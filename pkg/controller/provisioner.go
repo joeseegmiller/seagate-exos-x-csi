@@ -98,6 +98,13 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 		}
 
 		if sourceId != "" {
+			if snapshot := req.VolumeContentSource.GetSnapshot(); snapshot != nil {
+				_, backendSnapshotID, err := parseSnapshotID(sourceId)
+				if err != nil {
+					return nil, status.Error(codes.InvalidArgument, err.Error())
+				}
+				sourceId = backendSnapshotID
+			}
 			sourceName, err := common.VolumeIdGetName(sourceId)
 			if err != nil {
 				return nil, err
