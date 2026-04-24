@@ -249,7 +249,7 @@ func TestMountFilesystemInitializesBlankExt4Volume(t *testing.T) {
 	}
 }
 
-func TestMountFilesystemRetriesXFSWithNouuidOnDuplicateUUID(t *testing.T) {
+func TestMountFilesystemRetriesXFSWithNouuidAfterAnyMountFailure(t *testing.T) {
 	t.Helper()
 
 	originalExecCommand := execCommand
@@ -273,7 +273,7 @@ func TestMountFilesystemRetriesXFSWithNouuidOnDuplicateUUID(t *testing.T) {
 		case name == "findmnt":
 			return helperCommand(t, 1, "")
 		case reflect.DeepEqual(command, []string{"mount", "-t", "xfs", "/dev/dm-2", "/target"}):
-			return helperCommand(t, 1, "XFS (dm-2): Filesystem has duplicate UUID 12345678-1234-1234-1234-123456789abc - can't mount\n")
+			return helperCommand(t, 1, "wrong fs type, bad option, bad superblock on /dev/dm-2")
 		case reflect.DeepEqual(command, []string{"mount", "-t", "xfs", "-o", "nouuid", "/dev/dm-2", "/target"}):
 			return helperCommand(t, 0, "mounted with nouuid")
 		default:
@@ -302,62 +302,6 @@ func TestMountFilesystemRetriesXFSWithNouuidOnDuplicateUUID(t *testing.T) {
 		{"findmnt", "--output", "TARGET", "--noheadings", "/dev/dm-2"},
 		{"mount", "-t", "xfs", "/dev/dm-2", "/target"},
 		{"mount", "-t", "xfs", "-o", "nouuid", "/dev/dm-2", "/target"},
-	}
-	if !reflect.DeepEqual(commands, want) {
-		t.Fatalf("commands = %v, want %v", commands, want)
-	}
-}
-
-func TestMountFilesystemDoesNotRetryXFSForNonDuplicateUUIDFailure(t *testing.T) {
-	t.Helper()
-
-	originalExecCommand := execCommand
-	originalExecCommandContext := execCommandContext
-	t.Cleanup(func() {
-		execCommand = originalExecCommand
-		execCommandContext = originalExecCommandContext
-	})
-
-	var commands [][]string
-	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		commands = append(commands, append([]string{name}, args...))
-		return helperCommand(t, 0, "TYPE=xfs\n")
-	}
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		command := append([]string{name}, args...)
-		commands = append(commands, command)
-		switch {
-		case name == "xfs_repair":
-			return helperCommand(t, 0, "checked")
-		case name == "findmnt":
-			return helperCommand(t, 1, "")
-		case reflect.DeepEqual(command, []string{"mount", "-t", "xfs", "/dev/dm-4", "/target"}):
-			return helperCommand(t, 1, "wrong fs type, bad option, bad superblock on /dev/dm-4")
-		default:
-			t.Fatalf("unexpected command: %v", command)
-			return nil
-		}
-	}
-
-	req := &csi.NodePublishVolumeRequest{
-		TargetPath: "/target",
-		VolumeCapability: &csi.VolumeCapability{
-			AccessType: &csi.VolumeCapability_Mount{
-				Mount: &csi.VolumeCapability_MountVolume{FsType: "xfs"},
-			},
-		},
-	}
-
-	if err := MountFilesystem(req, "/dev/dm-4"); err == nil {
-		t.Fatal("expected xfs mount failure")
-	}
-
-	want := [][]string{
-		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-4"},
-		{"xfs_repair", "-n", "/dev/dm-4"},
-		{"xfs_repair", "-n", "/dev/dm-4"},
-		{"findmnt", "--output", "TARGET", "--noheadings", "/dev/dm-4"},
-		{"mount", "-t", "xfs", "/dev/dm-4", "/target"},
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %v, want %v", commands, want)
@@ -534,38 +478,6 @@ func TestEnsureFsTypeKeepsValidDetectedExt4(t *testing.T) {
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %v, want %v", commands, want)
-	}
-}
-
-func TestIsXFSNouuidMountError(t *testing.T) {
-	tests := []struct {
-		name   string
-		output string
-		want   bool
-	}{
-		{
-			name:   "exact duplicate uuid mount failure",
-			output: "XFS (dm-2): Filesystem has duplicate UUID 12345678-1234-1234-1234-123456789abc - can't mount\n",
-			want:   true,
-		},
-		{
-			name:   "duplicate uuid without cant mount",
-			output: "XFS (dm-2): Filesystem has duplicate UUID 12345678-1234-1234-1234-123456789abc\n",
-			want:   false,
-		},
-		{
-			name:   "generic wrong fs type",
-			output: "wrong fs type, bad option, bad superblock on /dev/dm-1",
-			want:   false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isXFSNouuidMountError([]byte(tt.output)); got != tt.want {
-				t.Fatalf("isXFSNouuidMountError(%q) = %v, want %v", tt.output, got, tt.want)
-			}
-		})
 	}
 }
 
