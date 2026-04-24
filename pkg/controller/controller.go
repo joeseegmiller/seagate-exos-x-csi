@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	storageapi "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/api"
+	storageapitypes "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/common"
 	"github.com/Seagate/seagate-exos-x-api-go/v2/pkg/client"
 	"github.com/Seagate/seagate-exos-x-csi/pkg/common"
 	"github.com/Seagate/seagate-exos-x-csi/pkg/node_service"
@@ -38,6 +39,9 @@ var csiMutexes = map[string]*sync.Mutex{
 	"/csi.v1.Controller/DeleteVolume":              {},
 	"/csi.v1.Controller/ControllerUnpublishVolume": {},
 	"/csi.v1.Controller/ControllerExpandVolume":    {},
+	"/csi.v1.Controller/CreateSnapshot":            {},
+	"/csi.v1.Controller/DeleteSnapshot":            {},
+	"/csi.v1.Controller/ListSnapshots":             {},
 }
 
 var nonAuthenticatedMethods = []string{
@@ -45,6 +49,8 @@ var nonAuthenticatedMethods = []string{
 	"/csi.v1.Controller/ListVolumes",
 	"/csi.v1.Controller/GetCapacity",
 	"/csi.v1.Controller/ControllerGetVolume",
+	"/csi.v1.Controller/DeleteSnapshot",
+	"/csi.v1.Controller/ListSnapshots",
 	"/csi.v1.Identity/Probe",
 	"/csi.v1.Identity/GetPluginInfo",
 	"/csi.v1.Identity/GetPluginCapabilities",
@@ -57,6 +63,12 @@ type Controller struct {
 	client             *storageapi.Client
 	nodeServiceClients map[string]*grpc.ClientConn
 	runPath            string
+	backendConfigs     map[string]BackendConfig
+	backendConfigErr   error
+	configureClientFn  func(credentials map[string]string) error
+	showSnapshotsFn    func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, *storageapitypes.Status, error)
+	createSnapshotFn   func(sourceVolumeID, snapshotName string) (*storageapitypes.Status, error)
+	deleteSnapshotFn   func(snapshotID string) (*storageapitypes.Status, error)
 }
 
 // DriverCtx contains data common to most calls
@@ -74,6 +86,16 @@ func New() *Controller {
 		client:             client,
 		runPath:            fmt.Sprintf("/var/run/%s", common.PluginName),
 		nodeServiceClients: map[string]*grpc.ClientConn{},
+	}
+	controller.backendConfigs, controller.backendConfigErr = loadBackendConfigsFromFile(os.Getenv(common.ControllerBackendConfigFileEnvVar))
+	controller.configureClientFn = controller.configureClient
+	controller.showSnapshotsFn = controller.client.ShowSnapshots
+	controller.createSnapshotFn = controller.client.CreateSnapshot
+	controller.deleteSnapshotFn = controller.client.DeleteSnapshot
+	if controller.backendConfigErr != nil {
+		klog.ErrorS(controller.backendConfigErr, "failed to load controller backend credentials")
+	} else if len(controller.backendConfigs) > 0 {
+		klog.InfoS("loaded controller backend credentials", "backendCount", len(controller.backendConfigs))
 	}
 
 	if err := os.MkdirAll(controller.runPath, 0755); err != nil {
@@ -106,7 +128,7 @@ func New() *Controller {
 
 			err := controller.beginRoutine(&driverContext, info.FullMethod)
 			if err != nil {
-				klog.Infof("controller.beginRoutine error for req = %x", reqWithSecrets)
+				klog.ErrorS(err, "controller beginRoutine failed", "method", info.FullMethod)
 			}
 			defer controller.endRoutine()
 			if err != nil {
@@ -223,7 +245,7 @@ func (controller *Controller) beginRoutine(ctx *DriverCtx, methodName string) er
 		return errors.New("missing API credentials")
 	}
 
-	return controller.configureClient(ctx.Credentials)
+	return controller.configureClientFn(ctx.Credentials)
 }
 
 func (controller *Controller) endRoutine() {
@@ -253,8 +275,6 @@ func (controller *Controller) configureClient(credentials map[string]string) err
 	if secondaryapiAddr != "" {
 		apiAddresses = append(apiAddresses, secondaryapiAddr)
 	}
-	klog.InfoS("using API", "addresses", apiAddresses)
-
 	controller.client.StoreCredentials(apiAddresses, "", username, password)
 
 	ctx := context.WithValue(context.Background(), client.ContextBasicAuth, client.BasicAuth{

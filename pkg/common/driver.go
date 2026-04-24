@@ -35,6 +35,7 @@ const (
 	CHAPUsernameInKey         = "CHAPusernameIn"
 	CHAPPasswordInKey         = "CHAPpasswordIn"
 	StorageClassAnnotationKey = "storageClass"
+	BackendIDConfigKey        = "backendID"
 	VolumePrefixKey           = "volPrefix"
 	WWNs                      = "wwns"
 	StorageProtocolKey        = "storageProtocol"
@@ -55,6 +56,7 @@ const (
 	NodeIPEnvVar          = "CSI_NODE_IP"
 	NodeNameEnvVar        = "CSI_NODE_NAME"
 	NodeServicePortEnvVar = "CSI_NODE_SERVICE_PORT"
+	ControllerBackendConfigFileEnvVar = "EXOS_BACKEND_CONFIG_FILE"
 )
 
 var SupportedAccessModes = [3]csi.VolumeCapability_AccessMode_Mode{

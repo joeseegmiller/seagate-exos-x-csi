@@ -17,8 +17,16 @@ import (
 
 // CreateSnapshot creates a snapshot of the given volume
 func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
+	if controller.backendConfigErr != nil {
+		return nil, status.Error(codes.FailedPrecondition, controller.backendConfigErr.Error())
+	}
 
 	parameters := req.GetParameters()
+	backendID, err := controller.resolveCreateSnapshotBackendID(parameters)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
 	snapshotName, err := common.TranslateName(req.GetName(), parameters[common.VolumePrefixKey])
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "translate snapshot name contains invalid characters")
@@ -33,13 +41,17 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 		return nil, status.Error(codes.InvalidArgument, "snapshot SourceVolumeId is not valid")
 	}
 
-	respStatus, err := controller.client.CreateSnapshot(sourceVolumeId, snapshotName)
+	if err := controller.configureBackendByID(backendID); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+
+	respStatus, err := controller.createSnapshotFn(sourceVolumeId, snapshotName)
 	if err != nil && respStatus.ReturnCode != storageapitypes.SnapshotAlreadyExists {
 		return nil, err
 	}
 
 	// The expectation is that show snapshots will return a single array item for the snapshot created
-	snapshots, _, err := controller.client.ShowSnapshots(snapshotName, "")
+	snapshots, _, err := controller.showSnapshotsFn(snapshotName, "")
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +62,7 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 			continue
 		}
 
-		snapshot, err = newSnapshotFromResponse(&ss)
+		snapshot, err = newSnapshotFromResponse(&ss, backendID)
 		if err != nil {
 			return nil, err
 		}
@@ -74,7 +86,12 @@ func (controller *Controller) DeleteSnapshot(ctx context.Context, req *csi.Delet
 		return nil, status.Error(codes.InvalidArgument, "DeleteSnapshot snapshot id is required")
 	}
 
-	status, err := controller.client.DeleteSnapshot(req.SnapshotId)
+	backendSnapshotID, err := controller.prepareDeleteSnapshotClient(req)
+	if err != nil {
+		return nil, err
+	}
+
+	status, err := controller.deleteSnapshotFn(backendSnapshotID)
 	if err != nil {
 		if status != nil && status.ReturnCode == storageapitypes.SnapshotNotFoundErrorCode {
 			klog.Infof("snapshot %s does not exist, assuming it has already been deleted", req.SnapshotId)
@@ -87,58 +104,46 @@ func (controller *Controller) DeleteSnapshot(ctx context.Context, req *csi.Delet
 
 // ListSnapshots: list existing snapshots up to MaxEntries
 func (controller *Controller) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRequest) (*csi.ListSnapshotsResponse, error) {
-	sourceVolumeId, err := common.VolumeIdGetName(req.GetSourceVolumeId())
+	if controller.backendConfigErr != nil {
+		return nil, status.Error(codes.FailedPrecondition, controller.backendConfigErr.Error())
+	}
 
-	response, respStatus, err := controller.client.ShowSnapshots(req.SnapshotId, sourceVolumeId)
-	// BadInputParam is returned from the controller when an invalid volume is specified,
-	// so return an empty response object in this case
+	sourceVolumeId, err := common.VolumeIdGetName(req.GetSourceVolumeId())
 	if err != nil {
-		if respStatus.ReturnCode == storageapitypes.BadInputParam {
-			return &csi.ListSnapshotsResponse{
-				Entries:   []*csi.ListSnapshotsResponse_Entry{},
-				NextToken: "",
-			}, nil
-		} else {
-			return nil, err
-		}
+		return nil, status.Error(codes.InvalidArgument, "snapshot SourceVolumeId is not valid")
 	}
 
 	// StartingToken is an index from 1 to maximum, "" returns 0
 	startingToken, err := strconv.Atoi(req.StartingToken)
 	klog.V(2).Infof("ListSnapshots: MaxEntries=%v, StartingToken=%q|%d", req.MaxEntries, req.StartingToken, startingToken)
 
-	snapshots := []*csi.ListSnapshotsResponse_Entry{}
+	snapshots, err := controller.listSnapshotEntries(req, sourceVolumeId)
+	if err != nil {
+		return nil, err
+	}
+
+	window := []*csi.ListSnapshotsResponse_Entry{}
 	var count, total, next int32 = 0, 0, math.MaxInt32
 
-	for _, object := range response {
+	for _, entry := range snapshots {
+		snapshot := entry.Snapshot
+		total++
+		klog.V(2).Infof("snapshot[%d]: SnapshotId=%v, SourceVolumeId=%v", total, snapshot.SnapshotId, snapshot.SourceVolumeId)
 
-		// Convert raw object into csi.Snapshot object
-		snapshot, err := newSnapshotFromResponse(&object)
-
-		// Only store snapshot objects
-		if err == nil {
-			total++
-			klog.V(2).Infof("snapshot[%d]: SnapshotId=%v, SourceVolumeId=%v", total, snapshot.SnapshotId, snapshot.SourceVolumeId)
-
-			// Filter entries if StartingToken is provided
-			if (req.StartingToken == "") || (req.StartingToken != "" && total >= int32(startingToken)) {
-
-				// Only add entries up to the maximum
-				if (req.MaxEntries == 0) || (count < req.MaxEntries) {
-					snapshots = append(snapshots, &csi.ListSnapshotsResponse_Entry{Snapshot: snapshot})
-					count++
-					klog.V(2).Infof("   added[%d]: SnapshotId=%v, SourceVolumeId=%v", count, snapshot.SnapshotId, snapshot.SourceVolumeId)
-				}
-				// When needed, store the next index which is returned to the caller
-				if (req.MaxEntries != 0) && (count == req.MaxEntries) && (next == math.MaxInt32) {
-					next = total + 1
-					klog.V(2).Infof("next=%v", next)
-				}
+		if (req.StartingToken == "") || (req.StartingToken != "" && total >= int32(startingToken)) {
+			if (req.MaxEntries == 0) || (count < req.MaxEntries) {
+				window = append(window, entry)
+				count++
+				klog.V(2).Infof("   added[%d]: SnapshotId=%v, SourceVolumeId=%v", count, snapshot.SnapshotId, snapshot.SourceVolumeId)
+			}
+			if (req.MaxEntries != 0) && (count == req.MaxEntries) && (next == math.MaxInt32) {
+				next = total + 1
+				klog.V(2).Infof("next=%v", next)
 			}
 		}
 	}
 
-	klog.V(2).Infof("ListSnapshots[%d]: %v", count, snapshots)
+	klog.V(2).Infof("ListSnapshots[%d]: %v", count, window)
 
 	// Mark the next token if there are snapshot entries remaining
 	nextToken := ""
@@ -148,12 +153,83 @@ func (controller *Controller) ListSnapshots(ctx context.Context, req *csi.ListSn
 	}
 
 	return &csi.ListSnapshotsResponse{
-		Entries:   snapshots,
+		Entries:   window,
 		NextToken: nextToken,
 	}, nil
 }
 
-func newSnapshotFromResponse(snapshot *storageapitypes.SnapshotObject) (*csi.Snapshot, error) {
+func (controller *Controller) prepareDeleteSnapshotClient(req *csi.DeleteSnapshotRequest) (string, error) {
+	if controller.backendConfigErr != nil {
+		return "", controller.backendConfigErr
+	}
+
+	if len(req.GetSecrets()) != 0 {
+		if err := controller.configureClientFn(req.GetSecrets()); err != nil {
+			return "", err
+		}
+		_, backendSnapshotID, err := parseSnapshotID(req.GetSnapshotId())
+		if err != nil {
+			return "", status.Error(codes.InvalidArgument, err.Error())
+		}
+		return backendSnapshotID, nil
+	}
+
+	_, backendSnapshotID, credentials, err := controller.resolveCredentialsForSnapshotID(req.GetSnapshotId())
+	if err != nil {
+		return "", status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := controller.configureClientFn(credentials); err != nil {
+		return "", err
+	}
+	return backendSnapshotID, nil
+}
+
+func (controller *Controller) listSnapshotEntries(req *csi.ListSnapshotsRequest, sourceVolumeId string) ([]*csi.ListSnapshotsResponse_Entry, error) {
+	if req.GetSnapshotId() != "" {
+		backendID, backendSnapshotID, credentials, err := controller.resolveCredentialsForSnapshotID(req.GetSnapshotId())
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		return controller.listSnapshotEntriesForBackend(backendID, backendSnapshotID, sourceVolumeId, credentials)
+	}
+
+	if len(controller.backendConfigs) == 0 {
+		return nil, status.Error(codes.Unauthenticated, "missing controller backend credentials for ListSnapshots")
+	}
+
+	if len(controller.backendConfigs) > 1 {
+		return nil, status.Error(codes.Unimplemented, "ListSnapshots without SnapshotId is not supported with multiple backends")
+	}
+
+	backendID := controller.sortedBackendIDs()[0]
+	return controller.listSnapshotEntriesForBackend(backendID, "", sourceVolumeId, controller.backendConfigs[backendID].credentials())
+}
+
+func (controller *Controller) listSnapshotEntriesForBackend(backendID, snapshotID, sourceVolumeId string, credentials map[string]string) ([]*csi.ListSnapshotsResponse_Entry, error) {
+	if err := controller.configureClientFn(credentials); err != nil {
+		return nil, err
+	}
+
+	response, respStatus, err := controller.showSnapshotsFn(snapshotID, sourceVolumeId)
+	if err != nil {
+		if respStatus != nil && respStatus.ReturnCode == storageapitypes.BadInputParam {
+			return []*csi.ListSnapshotsResponse_Entry{}, nil
+		}
+		return nil, err
+	}
+
+	entries := []*csi.ListSnapshotsResponse_Entry{}
+	for _, object := range response {
+		snapshot, err := newSnapshotFromResponse(&object, backendID)
+		if err == nil {
+			entries = append(entries, &csi.ListSnapshotsResponse_Entry{Snapshot: snapshot})
+		}
+	}
+
+	return entries, nil
+}
+
+func newSnapshotFromResponse(snapshot *storageapitypes.SnapshotObject, backendID string) (*csi.Snapshot, error) {
 	if snapshot.ObjectName != "snapshot" {
 		return nil, fmt.Errorf("not a snapshot object, type is %v", snapshot.ObjectName)
 	}
@@ -162,7 +238,7 @@ func newSnapshotFromResponse(snapshot *storageapitypes.SnapshotObject) (*csi.Sna
 
 	return &csi.Snapshot{
 		SizeBytes:      snapshot.TotalSizeNumeric,
-		SnapshotId:     snapshot.Name,
+		SnapshotId:     formatSnapshotID(backendID, snapshot.Name),
 		SourceVolumeId: snapshot.MasterVolumeName,
 		CreationTime:   snapshot.CreationTime,
 		ReadyToUse:     true,
