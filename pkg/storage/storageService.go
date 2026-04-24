@@ -405,12 +405,6 @@ func ResizeFilesystem(devicePath, volumePath string) error {
 	return nil
 }
 
-func isXFSNouuidMountError(output []byte) bool {
-	message := strings.ToLower(string(output))
-	return strings.Contains(message, "filesystem has duplicate uuid") &&
-		strings.Contains(message, "can't mount")
-}
-
 func mountTarget(fsType, devicePath, targetPath string) error {
 	args := []string{"-t", fsType, devicePath, targetPath}
 	klog.Infof("Running mount command: mount %s", strings.Join(args, " "))
@@ -424,11 +418,11 @@ func mountTarget(fsType, devicePath, targetPath string) error {
 		strings.TrimSpace(string(out)),
 	)
 
-	if fsType != "xfs" || !isXFSNouuidMountError(out) {
+	if fsType != "xfs" {
 		return status.Error(codes.Internal, string(out))
 	}
 
-	klog.Infof("xfs mount failed with duplicate UUID signature for %s, retrying with nouuid", devicePath)
+	klog.Infof("xfs mount failed for %s, retrying with nouuid", devicePath)
 	retryArgs := []string{"-t", fsType, "-o", "nouuid", devicePath, targetPath}
 	klog.Infof("Running mount command: mount %s", strings.Join(retryArgs, " "))
 	retryOut, retryErr := execCommand("mount", retryArgs...).CombinedOutput()
