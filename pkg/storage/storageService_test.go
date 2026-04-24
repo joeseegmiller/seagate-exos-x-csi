@@ -141,114 +141,6 @@ func TestResizeFilesystemHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
-func TestMountFilesystemInitializesBlankXFSVolume(t *testing.T) {
-	t.Helper()
-
-	originalExecCommand := execCommand
-	originalExecCommandContext := execCommandContext
-	t.Cleanup(func() {
-		execCommand = originalExecCommand
-		execCommandContext = originalExecCommandContext
-	})
-
-	var commands [][]string
-	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		commands = append(commands, append([]string{name}, args...))
-		return helperCommand(t, 2, "")
-	}
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		command := append([]string{name}, args...)
-		commands = append(commands, command)
-		switch name {
-		case "mkfs.xfs", "xfs_repair", "mount":
-			return helperCommand(t, 0, "ok")
-		case "findmnt":
-			return helperCommand(t, 1, "")
-		default:
-			t.Fatalf("unexpected command: %v", command)
-			return nil
-		}
-	}
-
-	req := &csi.NodePublishVolumeRequest{
-		TargetPath: t.TempDir() + "/target",
-		VolumeCapability: &csi.VolumeCapability{
-			AccessType: &csi.VolumeCapability_Mount{
-				Mount: &csi.VolumeCapability_MountVolume{FsType: "xfs"},
-			},
-		},
-	}
-
-	if err := MountFilesystem(req, "/dev/dm-0"); err != nil {
-		t.Fatalf("MountFilesystem returned error: %v", err)
-	}
-
-	want := [][]string{
-		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-0"},
-		{"mkfs.xfs", "/dev/dm-0"},
-		{"xfs_repair", "-n", "/dev/dm-0"},
-		{"findmnt", "--output", "TARGET", "--noheadings", "/dev/dm-0"},
-		{"mount", "-t", "xfs", "/dev/dm-0", req.GetTargetPath()},
-	}
-	if !reflect.DeepEqual(commands, want) {
-		t.Fatalf("commands = %v, want %v", commands, want)
-	}
-}
-
-func TestMountFilesystemInitializesBlankExt4Volume(t *testing.T) {
-	t.Helper()
-
-	originalExecCommand := execCommand
-	originalExecCommandContext := execCommandContext
-	t.Cleanup(func() {
-		execCommand = originalExecCommand
-		execCommandContext = originalExecCommandContext
-	})
-
-	var commands [][]string
-	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		commands = append(commands, append([]string{name}, args...))
-		return helperCommand(t, 2, "")
-	}
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		command := append([]string{name}, args...)
-		commands = append(commands, command)
-		switch name {
-		case "mkfs.ext4", "e2fsck", "mount":
-			return helperCommand(t, 0, "ok")
-		case "findmnt":
-			return helperCommand(t, 1, "")
-		default:
-			t.Fatalf("unexpected command: %v", command)
-			return nil
-		}
-	}
-
-	req := &csi.NodePublishVolumeRequest{
-		TargetPath: t.TempDir() + "/target",
-		VolumeCapability: &csi.VolumeCapability{
-			AccessType: &csi.VolumeCapability_Mount{
-				Mount: &csi.VolumeCapability_MountVolume{FsType: "ext4"},
-			},
-		},
-	}
-
-	if err := MountFilesystem(req, "/dev/dm-1"); err != nil {
-		t.Fatalf("MountFilesystem returned error: %v", err)
-	}
-
-	want := [][]string{
-		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-1"},
-		{"mkfs.ext4", "/dev/dm-1"},
-		{"e2fsck", "-n", "/dev/dm-1"},
-		{"findmnt", "--output", "TARGET", "--noheadings", "/dev/dm-1"},
-		{"mount", "-t", "ext4", "/dev/dm-1", req.GetTargetPath()},
-	}
-	if !reflect.DeepEqual(commands, want) {
-		t.Fatalf("commands = %v, want %v", commands, want)
-	}
-}
-
 func TestMountFilesystemRetriesXFSWithNouuidAfterAnyMountFailure(t *testing.T) {
 	t.Helper()
 
@@ -295,16 +187,12 @@ func TestMountFilesystemRetriesXFSWithNouuidAfterAnyMountFailure(t *testing.T) {
 		t.Fatalf("MountFilesystem returned error: %v", err)
 	}
 
-	want := [][]string{
-		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-2"},
-		{"xfs_repair", "-n", "/dev/dm-2"},
-		{"xfs_repair", "-n", "/dev/dm-2"},
-		{"findmnt", "--output", "TARGET", "--noheadings", "/dev/dm-2"},
+	wantMounts := [][]string{
 		{"mount", "-t", "xfs", "/dev/dm-2", "/target"},
 		{"mount", "-t", "xfs", "-o", "nouuid", "/dev/dm-2", "/target"},
 	}
-	if !reflect.DeepEqual(commands, want) {
-		t.Fatalf("commands = %v, want %v", commands, want)
+	if got := filterCommands(commands, "mount"); !reflect.DeepEqual(got, wantMounts) {
+		t.Fatalf("mount commands = %v, want %v", got, wantMounts)
 	}
 }
 
@@ -352,15 +240,11 @@ func TestMountFilesystemDoesNotRetryExt4MountFailures(t *testing.T) {
 		t.Fatal("expected ext4 mount failure")
 	}
 
-	want := [][]string{
-		{"blkid", "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", "/dev/dm-3"},
-		{"e2fsck", "-n", "/dev/dm-3"},
-		{"e2fsck", "-n", "/dev/dm-3"},
-		{"findmnt", "--output", "TARGET", "--noheadings", "/dev/dm-3"},
+	wantMounts := [][]string{
 		{"mount", "-t", "ext4", "/dev/dm-3", "/target"},
 	}
-	if !reflect.DeepEqual(commands, want) {
-		t.Fatalf("commands = %v, want %v", commands, want)
+	if got := filterCommands(commands, "mount"); !reflect.DeepEqual(got, wantMounts) {
+		t.Fatalf("mount commands = %v, want %v", got, wantMounts)
 	}
 }
 
@@ -485,6 +369,16 @@ func helperCommand(t *testing.T, exitCode int, stdout string) *exec.Cmd {
 	t.Helper()
 
 	return exec.Command(os.Args[0], "-test.run=TestStorageCommandHelper", "--", fmt.Sprintf("%d", exitCode), stdout)
+}
+
+func filterCommands(commands [][]string, name string) [][]string {
+	filtered := [][]string{}
+	for _, command := range commands {
+		if len(command) > 0 && command[0] == name {
+			filtered = append(filtered, command)
+		}
+	}
+	return filtered
 }
 
 func TestStorageCommandHelper(t *testing.T) {

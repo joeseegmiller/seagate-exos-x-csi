@@ -155,25 +155,7 @@ func GetFsType(req *csi.NodePublishVolumeRequest) string {
 	return fsType
 }
 
-// CheckFs: Perform a file system validation
-func CheckFs(path string, fstype string, context string) error {
-
-	if IsVolumeInUse(path) {
-		klog.Infof("Volume already mounted, not performing FS check")
-		return nil
-	}
-
-	fsRepairCommand := "e2fsck"
-	if fstype == "xfs" {
-		fsRepairCommand = "xfs_repair"
-	}
-	klog.Infof("Checking filesystem (%s -n %s) [%s]", fsRepairCommand, path, context)
-	if out, err := execCommand(fsRepairCommand, "-n", path).CombinedOutput(); err != nil {
-		return errors.New(string(out))
-	}
-	return nil
-}
-
+// filesystemValidator returns the validation command used before trusting a detected filesystem.
 func filesystemValidator(fsType string) string {
 	if fsType == "xfs" {
 		return "xfs_repair"
@@ -407,7 +389,7 @@ func ResizeFilesystem(devicePath, volumePath string) error {
 
 func mountTarget(fsType, devicePath, targetPath string) error {
 	args := []string{"-t", fsType, devicePath, targetPath}
-	klog.Infof("Running mount command: mount %s", strings.Join(args, " "))
+	klog.V(4).Infof("Running mount command: mount %s", strings.Join(args, " "))
 	out, err := execCommand("mount", args...).CombinedOutput()
 	if err == nil {
 		return nil
@@ -422,9 +404,12 @@ func mountTarget(fsType, devicePath, targetPath string) error {
 		return status.Error(codes.Internal, string(out))
 	}
 
+	// XFS preserves filesystem UUIDs across clones and snapshots. Linux refuses
+	// to mount multiple XFS filesystems with the same UUID on the same node, so
+	// retry with nouuid to allow cloned volumes to mount together.
 	klog.Infof("xfs mount failed for %s, retrying with nouuid", devicePath)
 	retryArgs := []string{"-t", fsType, "-o", "nouuid", devicePath, targetPath}
-	klog.Infof("Running mount command: mount %s", strings.Join(retryArgs, " "))
+	klog.V(4).Infof("Running mount command: mount %s", strings.Join(retryArgs, " "))
 	retryOut, retryErr := execCommand("mount", retryArgs...).CombinedOutput()
 	if retryErr != nil {
 		klog.Errorf("Mount retry failed: cmd='mount %s' err='%v' output='%s'",
@@ -478,14 +463,9 @@ func MountFilesystem(req *csi.NodePublishVolumeRequest, path string) error {
 		return status.Error(codes.Internal, err.Error())
 	}
 
-	if err = CheckFs(path, fsType, "Publish"); err != nil {
-		return err
-	}
-
 	out, err := execCommand("findmnt", "--output", "TARGET", "--noheadings", path).Output()
 	mountpoints := strings.Split(strings.Trim(string(out), "\n"), "\n")
 	if err != nil || len(mountpoints) == 0 {
-		klog.V(1).InfoS("mount", "command", fmt.Sprintf("mount -t %s %s %s", fsType, path, req.GetTargetPath()))
 		os.Mkdir(req.GetTargetPath(), 00755)
 		if _, err = os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			klog.InfoS("targetpath does not exist", "targetPath", req.GetTargetPath())
