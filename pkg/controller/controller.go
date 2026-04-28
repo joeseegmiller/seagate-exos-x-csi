@@ -332,10 +332,6 @@ func runPreflightChecks(parameters map[string]string, capabilities *[]*csi.Volum
 		return nil
 	}
 
-	if err := checkIfKeyExistsInConfig(common.PoolConfigKey); err != nil {
-		return err
-	}
-
 	if capabilities != nil {
 		if len(*capabilities) == 0 {
 			return status.Error(codes.InvalidArgument, "missing volume capabilities")

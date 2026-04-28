@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
+	"strings"
 
 	storageapitypes "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/common"
 	"github.com/Seagate/seagate-exos-x-csi/pkg/common"
@@ -14,6 +16,13 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
 )
+
+var invalidSnapshotNameChars = regexp.MustCompile(`[^a-z0-9-]`)
+
+func sanitizeName(s string) string {
+	s = strings.ToLower(s)
+	return invalidSnapshotNameChars.ReplaceAllString(s, "-")
+}
 
 // CreateSnapshot creates a snapshot of the given volume
 func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
@@ -27,19 +36,28 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	credentials := config.credentials()
-	snapshotName, err := common.TranslateName(req.GetName(), parameters[common.VolumePrefixKey])
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, "translate snapshot name contains invalid characters")
-	}
-
-	if common.ValidateName(snapshotName) == false {
-		return nil, status.Error(codes.InvalidArgument, "snapshot name contains invalid characters")
-	}
 
 	sourceVolumeId, err := common.VolumeIdGetName(req.GetSourceVolumeId())
 	if sourceVolumeId == "" || err != nil {
 		return nil, status.Error(codes.InvalidArgument, "snapshot SourceVolumeId is not valid")
 	}
+
+	namePart := sanitizeName(req.GetName())
+	if namePart == "" {
+		namePart = "snap"
+	}
+	if len(namePart) > 32 {
+		namePart = namePart[:32]
+	}
+
+	// Note: StorageClass parameters (pool, storageProtocol, volPrefix) are not
+	// available during CreateSnapshot. Snapshot creation operates on an existing
+	// volume, so backend determines pool and protocol from the source volume.
+	snapshotName := fmt.Sprintf("%s-%s", sourceVolumeId, namePart)
+	if !common.ValidateName(snapshotName) {
+		return nil, status.Error(codes.InvalidArgument, "snapshot name contains invalid characters")
+	}
+	klog.Infof("creating snapshot %q for volume %q", snapshotName, sourceVolumeId)
 
 	if err := controller.configureClientFn(credentials); err != nil {
 		return nil, err
@@ -47,7 +65,9 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 
 	err = controller.createSnapshotFn(sourceVolumeId, snapshotName)
 	if err != nil {
-		return nil, err
+		if status.Code(err) != codes.AlreadyExists {
+			return nil, err
+		}
 	}
 
 	// The expectation is that show snapshots will return a single array item for the snapshot created

@@ -66,13 +66,23 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 		return nil, err
 	}
 
-	volumeName, err := common.TranslateName(req.GetName(), parameters[common.VolumePrefixKey])
+	pool := parameters[common.PoolConfigKey]
+	storageProtocol := storage.ValidateStorageProtocol(parameters[common.StorageProtocolKey])
+	volPrefix := parameters[common.VolumePrefixKey]
+	if pool == "" {
+		return nil, status.Error(codes.InvalidArgument, "'pool' is missing from configuration")
+	}
+	if storageProtocol == "" {
+		return nil, status.Error(codes.InvalidArgument, "'storageProtocol' is missing from configuration")
+	}
+	if volPrefix == "" {
+		return nil, status.Error(codes.InvalidArgument, "'volPrefix' is missing from configuration")
+	}
+
+	volumeName, err := common.TranslateName(req.GetName(), volPrefix)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "translate volume name contains invalid characters")
 	}
-
-	// Extract the storage interface protocol to be used for this volume (iscsi, fc, sas, etc)
-	storageProtocol := storage.ValidateStorageProtocol(parameters[common.StorageProtocolKey])
 
 	if !common.ValidateName(volumeName) {
 		return nil, status.Error(codes.InvalidArgument, "volume name contains invalid characters")
@@ -85,7 +95,6 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 
 	size := req.GetCapacityRange().GetRequiredBytes()
 	sizeStr := getSizeStr(size)
-	pool := parameters[common.PoolConfigKey]
 	wwn := ""
 
 	klog.Infof("creating volume %q (size %s) pool %q using protocol (%s)", volumeName, sizeStr, pool, storageProtocol)
@@ -120,7 +129,7 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 			if err != nil {
 				return nil, err
 			}
-			apiStatus, err2 := controller.client.CopyVolume(sourceName, volumeName, parameters[common.PoolConfigKey])
+			apiStatus, err2 := controller.client.CopyVolume(sourceName, volumeName, pool)
 			if err2 != nil {
 				klog.Infof("-- CopyVolume apiStatus.ReturnCode %v", apiStatus.ReturnCode)
 				if apiStatus != nil && apiStatus.ReturnCode == storageapitypes.SnapshotNotFoundErrorCode {
@@ -131,7 +140,7 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 			}
 
 		} else {
-			volume, apiStatus, err2 := controller.client.CreateVolume(volumeName, sizeStr, parameters[common.PoolConfigKey])
+			volume, apiStatus, err2 := controller.client.CreateVolume(volumeName, sizeStr, pool)
 			if err2 != nil {
 				return nil, err2
 			} else if apiStatus.ResponseTypeNumeric != 0 {
