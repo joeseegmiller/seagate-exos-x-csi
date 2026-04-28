@@ -121,6 +121,25 @@ func TestResolveCreateSnapshotBackendIDUsesSingleConfiguredBackend(t *testing.T)
 	}
 }
 
+func TestResolveCredentialsFallsBackToCreateSnapshotSecretsWhenNoBackendConfigs(t *testing.T) {
+	controller := &Controller{}
+	req := &csi.CreateSnapshotRequest{
+		Secrets: map[string]string{
+			"apiAddress": "https://array-a",
+			"username":   "user-a",
+			"password":   "pass-a",
+		},
+	}
+
+	credentials, err := controller.resolveCredentials(req)
+	if err != nil {
+		t.Fatalf("resolveCredentials returned error: %v", err)
+	}
+	if !reflect.DeepEqual(credentials, req.GetSecrets()) {
+		t.Fatalf("credentials = %v, want %v", credentials, req.GetSecrets())
+	}
+}
+
 func TestListSnapshotsResolvesBackendCredentialsWithoutRequestSecrets(t *testing.T) {
 	var configuredCredentials []map[string]string
 	controller := &Controller{
@@ -183,6 +202,44 @@ func TestCreateSnapshotFailsWithoutBackendIDInMultiBackendMode(t *testing.T) {
 	}
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("grpc code = %v, want %v", status.Code(err), codes.InvalidArgument)
+	}
+}
+
+func TestCreateSnapshotUsesRequestSecretsWhenNoBackendConfigs(t *testing.T) {
+	var configuredCredentials []map[string]string
+	controller := &Controller{
+		configureClientFn: func(credentials map[string]string) error {
+			configuredCredentials = append(configuredCredentials, credentials)
+			return nil
+		},
+	}
+	controller.createSnapshotFn = func(sourceVolumeID, snapshotName string) error { return nil }
+	controller.showSnapshotsFn = func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
+		return []storageapitypes.SnapshotObject{
+			{ObjectName: "snapshot", Name: "snap-004", MasterVolumeName: "vol-a"},
+		}, nil
+	}
+
+	req := &csi.CreateSnapshotRequest{
+		Name:           "snapshot-test",
+		SourceVolumeId: "vol-a",
+		Parameters:     map[string]string{},
+		Secrets: map[string]string{
+			"apiAddress": "https://array-a",
+			"username":   "user-a",
+			"password":   "pass-a",
+		},
+	}
+
+	resp, err := controller.CreateSnapshot(nil, req)
+	if err != nil {
+		t.Fatalf("CreateSnapshot returned error: %v", err)
+	}
+	if len(configuredCredentials) != 1 || !reflect.DeepEqual(configuredCredentials[0], req.GetSecrets()) {
+		t.Fatalf("configured credentials = %v, want %v", configuredCredentials, req.GetSecrets())
+	}
+	if got := resp.GetSnapshot().GetSnapshotId(); got != "default|snap-004" {
+		t.Fatalf("snapshot ID = %q, want default|snap-004", got)
 	}
 }
 

@@ -22,9 +22,18 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 	}
 
 	parameters := req.GetParameters()
-	backendID, err := controller.resolveCreateSnapshotBackendID(parameters)
+	credentials, err := controller.resolveCredentials(req)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	backendID := ""
+	if len(controller.backendConfigs) > 0 {
+		backendID, err = controller.resolveCreateSnapshotBackendID(parameters)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+	} else {
+		backendID = snapshotBackendIDFromParameters(parameters)
 	}
 
 	snapshotName, err := common.TranslateName(req.GetName(), parameters[common.VolumePrefixKey])
@@ -41,8 +50,8 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 		return nil, status.Error(codes.InvalidArgument, "snapshot SourceVolumeId is not valid")
 	}
 
-	if err := controller.configureBackendByID(backendID); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	if err := controller.configureClientFn(credentials); err != nil {
+		return nil, err
 	}
 
 	err = controller.createSnapshotFn(sourceVolumeId, snapshotName)
@@ -163,22 +172,26 @@ func (controller *Controller) prepareDeleteSnapshotClient(req *csi.DeleteSnapsho
 		return "", controller.backendConfigErr
 	}
 
-	if len(req.GetSecrets()) != 0 {
-		if err := controller.configureClientFn(req.GetSecrets()); err != nil {
-			return "", err
-		}
-		_, backendSnapshotID, err := parseSnapshotID(req.GetSnapshotId())
+	_, backendSnapshotID, err := parseSnapshotID(req.GetSnapshotId())
+	if err != nil {
+		return "", status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	if len(controller.backendConfigs) > 0 {
+		_, _, credentials, err := controller.resolveCredentialsForSnapshotID(req.GetSnapshotId())
 		if err != nil {
 			return "", status.Error(codes.InvalidArgument, err.Error())
+		}
+		if err := controller.configureClientFn(credentials); err != nil {
+			return "", err
 		}
 		return backendSnapshotID, nil
 	}
 
-	_, backendSnapshotID, credentials, err := controller.resolveCredentialsForSnapshotID(req.GetSnapshotId())
-	if err != nil {
-		return "", status.Error(codes.InvalidArgument, err.Error())
+	if len(req.GetSecrets()) == 0 {
+		return "", status.Error(codes.FailedPrecondition, "DeleteSnapshot secrets are required when controller backend credentials are not configured")
 	}
-	if err := controller.configureClientFn(credentials); err != nil {
+	if err := controller.configureClientFn(req.GetSecrets()); err != nil {
 		return "", err
 	}
 	return backendSnapshotID, nil

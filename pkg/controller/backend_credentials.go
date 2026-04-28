@@ -8,9 +8,11 @@ import (
 	"strings"
 
 	"github.com/Seagate/seagate-exos-x-csi/pkg/common"
+	"github.com/container-storage-interface/spec/lib/go/csi"
 )
 
 const snapshotIDDelimiter = "|"
+const defaultSnapshotBackendID = "default"
 
 type BackendConfig struct {
 	APIAddress  string `json:"apiAddress"`
@@ -106,6 +108,16 @@ func isValidBackendID(id string) bool {
 	return true
 }
 
+func snapshotBackendIDFromParameters(parameters map[string]string) string {
+	if parameters != nil {
+		backendID := parameters[common.BackendIDConfigKey]
+		if isValidBackendID(backendID) {
+			return backendID
+		}
+	}
+	return defaultSnapshotBackendID
+}
+
 func (controller *Controller) backendConfigByID(backendID string) (BackendConfig, error) {
 	if !isValidBackendID(backendID) {
 		return BackendConfig{}, fmt.Errorf("invalid backend ID %q", backendID)
@@ -133,10 +145,6 @@ func (controller *Controller) sortedBackendIDs() []string {
 }
 
 func (controller *Controller) resolveCreateSnapshotBackendID(parameters map[string]string) (string, error) {
-	if len(controller.backendConfigs) == 0 {
-		return "", fmt.Errorf("no controller backend credentials are configured")
-	}
-
 	backendID := ""
 	if parameters != nil {
 		backendID = parameters[common.BackendIDConfigKey]
@@ -158,6 +166,26 @@ func (controller *Controller) resolveCreateSnapshotBackendID(parameters map[stri
 	}
 
 	return backendID, nil
+}
+
+func (controller *Controller) resolveCredentials(req *csi.CreateSnapshotRequest) (map[string]string, error) {
+	if len(controller.backendConfigs) > 0 {
+		backendID, err := controller.resolveCreateSnapshotBackendID(req.GetParameters())
+		if err != nil {
+			return nil, err
+		}
+		config, err := controller.backendConfigByID(backendID)
+		if err != nil {
+			return nil, err
+		}
+		return config.credentials(), nil
+	}
+
+	if len(req.GetSecrets()) == 0 {
+		return nil, fmt.Errorf("CreateSnapshot secrets are required when controller backend credentials are not configured")
+	}
+
+	return req.GetSecrets(), nil
 }
 
 func (controller *Controller) resolveCredentialsForSnapshotID(snapshotID string) (backendID, backendSnapshotID string, credentials map[string]string, err error) {
