@@ -56,7 +56,7 @@ const (
 	NodeIPEnvVar          = "CSI_NODE_IP"
 	NodeNameEnvVar        = "CSI_NODE_NAME"
 	NodeServicePortEnvVar = "CSI_NODE_SERVICE_PORT"
-	ControllerBackendConfigFileEnvVar = "EXOS_BACKEND_CONFIG_FILE"
+	ControllerBackendConfigFileEnvVar = "CONTROLLER_BACKEND_CONFIG_FILE"
 )
 
 var SupportedAccessModes = [2]csi.VolumeCapability_AccessMode_Mode{
