@@ -92,6 +92,20 @@ func TestResolveCredentialsForSnapshotID(t *testing.T) {
 	}
 }
 
+func TestResolveCredentialsForSnapshotIDReturnsFailedPreconditionForUnknownBackend(t *testing.T) {
+	controller := &Controller{
+		backendConfigs: map[string]BackendConfig{
+			"backend-a": {APIAddress: "https://array-a", Username: "user-a", Password: "pass-a"},
+		},
+	}
+
+	if _, _, _, err := controller.resolveCredentialsForSnapshotID("backend-b|snap-002"); err == nil {
+		t.Fatal("expected resolveCredentialsForSnapshotID error")
+	} else if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("grpc code = %v, want %v", status.Code(err), codes.FailedPrecondition)
+	}
+}
+
 func TestResolveCreateSnapshotBackendIDRequiresExplicitBackendIDInMultiBackendMode(t *testing.T) {
 	controller := &Controller{
 		backendConfigs: map[string]BackendConfig{
@@ -121,7 +135,7 @@ func TestResolveCreateSnapshotBackendIDUsesSingleConfiguredBackend(t *testing.T)
 	}
 }
 
-func TestResolveCredentialsFallsBackToCreateSnapshotSecretsWhenNoBackendConfigs(t *testing.T) {
+func TestResolveCredentialsRequiresBackendConfigs(t *testing.T) {
 	controller := &Controller{}
 	req := &csi.CreateSnapshotRequest{
 		Secrets: map[string]string{
@@ -131,12 +145,8 @@ func TestResolveCredentialsFallsBackToCreateSnapshotSecretsWhenNoBackendConfigs(
 		},
 	}
 
-	credentials, err := controller.resolveCredentials(req)
-	if err != nil {
-		t.Fatalf("resolveCredentials returned error: %v", err)
-	}
-	if !reflect.DeepEqual(credentials, req.GetSecrets()) {
-		t.Fatalf("credentials = %v, want %v", credentials, req.GetSecrets())
+	if _, err := controller.resolveCredentials(req); err == nil {
+		t.Fatal("expected resolveCredentials error")
 	}
 }
 
@@ -205,41 +215,31 @@ func TestCreateSnapshotFailsWithoutBackendIDInMultiBackendMode(t *testing.T) {
 	}
 }
 
-func TestCreateSnapshotUsesRequestSecretsWhenNoBackendConfigs(t *testing.T) {
-	var configuredCredentials []map[string]string
+func TestCreateSnapshotRequiresConfiguredBackends(t *testing.T) {
 	controller := &Controller{
-		configureClientFn: func(credentials map[string]string) error {
-			configuredCredentials = append(configuredCredentials, credentials)
-			return nil
-		},
+		configureClientFn: func(credentials map[string]string) error { return nil },
 	}
-	controller.createSnapshotFn = func(sourceVolumeID, snapshotName string) error { return nil }
+	controller.createSnapshotFn = func(sourceVolumeID, snapshotName string) error {
+		t.Fatal("createSnapshotFn should not be called without configured backends")
+		return nil
+	}
 	controller.showSnapshotsFn = func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
-		return []storageapitypes.SnapshotObject{
-			{ObjectName: "snapshot", Name: "snap-004", MasterVolumeName: "vol-a"},
-		}, nil
+		t.Fatal("showSnapshotsFn should not be called without configured backends")
+		return nil, nil
 	}
 
 	req := &csi.CreateSnapshotRequest{
 		Name:           "snapshot-test",
 		SourceVolumeId: "vol-a",
-		Parameters:     map[string]string{},
-		Secrets: map[string]string{
-			"apiAddress": "https://array-a",
-			"username":   "user-a",
-			"password":   "pass-a",
-		},
+		Parameters:     map[string]string{"backendID": "backend-a"},
 	}
 
-	resp, err := controller.CreateSnapshot(nil, req)
-	if err != nil {
-		t.Fatalf("CreateSnapshot returned error: %v", err)
+	_, err := controller.CreateSnapshot(nil, req)
+	if err == nil {
+		t.Fatal("expected CreateSnapshot error")
 	}
-	if len(configuredCredentials) != 1 || !reflect.DeepEqual(configuredCredentials[0], req.GetSecrets()) {
-		t.Fatalf("configured credentials = %v, want %v", configuredCredentials, req.GetSecrets())
-	}
-	if got := resp.GetSnapshot().GetSnapshotId(); got != "default|snap-004" {
-		t.Fatalf("snapshot ID = %q, want default|snap-004", got)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("grpc code = %v, want %v", status.Code(err), codes.FailedPrecondition)
 	}
 }
 
@@ -277,6 +277,18 @@ func TestListSnapshotsWithoutSnapshotIDIsUnimplementedForMultiBackend(t *testing
 	}
 	if status.Code(err) != codes.Unimplemented {
 		t.Fatalf("grpc code = %v, want %v", status.Code(err), codes.Unimplemented)
+	}
+}
+
+func TestListSnapshotsRequiresConfiguredBackends(t *testing.T) {
+	controller := &Controller{}
+
+	_, err := controller.ListSnapshots(nil, &csi.ListSnapshotsRequest{})
+	if err == nil {
+		t.Fatal("expected ListSnapshots error")
+	}
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("grpc code = %v, want %v", status.Code(err), codes.FailedPrecondition)
 	}
 }
 

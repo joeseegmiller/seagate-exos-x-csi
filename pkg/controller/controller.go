@@ -78,6 +78,16 @@ type DriverCtx struct {
 	VolumeCaps  *[]*csi.VolumeCapability
 }
 
+func preserveStatusOr(code codes.Code, err error) error {
+	if err == nil {
+		return nil
+	}
+	if status.Code(err) != codes.OK {
+		return err
+	}
+	return status.Error(code, err.Error())
+}
+
 // New is a convenience fn for creating a controller driver
 func New() *Controller {
 	client := storageapi.NewClient()
@@ -113,7 +123,7 @@ func New() *Controller {
 		respStatus, err := controller.client.DeleteSnapshot(snapshotID)
 		if err != nil {
 			if respStatus != nil && respStatus.ReturnCode == storageapitypes.SnapshotNotFoundErrorCode {
-				return status.Error(codes.NotFound, err.Error())
+				return preserveStatusOr(codes.NotFound, err)
 			}
 			return err
 		}
@@ -310,7 +320,7 @@ func (controller *Controller) configureClient(credentials map[string]string) err
 	})
 	err := controller.client.Login(ctx)
 	if err != nil {
-		return status.Error(codes.Unauthenticated, err.Error())
+		return preserveStatusOr(codes.Unauthenticated, err)
 	}
 
 	klog.Info("login was successful")

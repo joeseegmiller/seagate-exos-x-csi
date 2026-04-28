@@ -22,20 +22,15 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 	}
 
 	parameters := req.GetParameters()
-	credentials, err := controller.resolveCredentials(req)
+	backendID, err := controller.resolveCreateSnapshotBackendID(parameters)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	config, err := controller.backendConfigByID(backendID)
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
-	backendID := ""
-	if len(controller.backendConfigs) > 0 {
-		backendID, err = controller.resolveCreateSnapshotBackendID(parameters)
-		if err != nil {
-			return nil, status.Error(codes.InvalidArgument, err.Error())
-		}
-	} else {
-		backendID = snapshotBackendIDFromParameters(parameters)
-	}
-
+	credentials := config.credentials()
 	snapshotName, err := common.TranslateName(req.GetName(), parameters[common.VolumePrefixKey])
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "translate snapshot name contains invalid characters")
@@ -169,7 +164,7 @@ func (controller *Controller) ListSnapshots(ctx context.Context, req *csi.ListSn
 
 func (controller *Controller) prepareDeleteSnapshotClient(req *csi.DeleteSnapshotRequest) (string, error) {
 	if controller.backendConfigErr != nil {
-		return "", controller.backendConfigErr
+		return "", status.Error(codes.FailedPrecondition, controller.backendConfigErr.Error())
 	}
 
 	_, backendSnapshotID, err := parseSnapshotID(req.GetSnapshotId())
@@ -177,21 +172,11 @@ func (controller *Controller) prepareDeleteSnapshotClient(req *csi.DeleteSnapsho
 		return "", status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	if len(controller.backendConfigs) > 0 {
-		_, _, credentials, err := controller.resolveCredentialsForSnapshotID(req.GetSnapshotId())
-		if err != nil {
-			return "", status.Error(codes.InvalidArgument, err.Error())
-		}
-		if err := controller.configureClientFn(credentials); err != nil {
-			return "", err
-		}
-		return backendSnapshotID, nil
+	_, _, credentials, err := controller.resolveCredentialsForSnapshotID(req.GetSnapshotId())
+	if err != nil {
+		return "", err
 	}
-
-	if len(req.GetSecrets()) == 0 {
-		return "", status.Error(codes.FailedPrecondition, "DeleteSnapshot secrets are required when controller backend credentials are not configured")
-	}
-	if err := controller.configureClientFn(req.GetSecrets()); err != nil {
+	if err := controller.configureClientFn(credentials); err != nil {
 		return "", err
 	}
 	return backendSnapshotID, nil
@@ -201,13 +186,13 @@ func (controller *Controller) listSnapshotEntries(req *csi.ListSnapshotsRequest,
 	if req.GetSnapshotId() != "" {
 		backendID, backendSnapshotID, credentials, err := controller.resolveCredentialsForSnapshotID(req.GetSnapshotId())
 		if err != nil {
-			return nil, status.Error(codes.InvalidArgument, err.Error())
+			return nil, err
 		}
 		return controller.listSnapshotEntriesForBackend(backendID, backendSnapshotID, sourceVolumeId, credentials)
 	}
 
 	if len(controller.backendConfigs) == 0 {
-		return nil, status.Error(codes.Unauthenticated, "missing controller backend credentials for ListSnapshots")
+		return nil, status.Error(codes.FailedPrecondition, "controller backend credentials are required; ensure CONTROLLER_BACKEND_CONFIG_FILE is set")
 	}
 
 	if len(controller.backendConfigs) > 1 {

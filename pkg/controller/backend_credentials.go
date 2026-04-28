@@ -9,10 +9,11 @@ import (
 
 	"github.com/Seagate/seagate-exos-x-csi/pkg/common"
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const snapshotIDDelimiter = "|"
-const defaultSnapshotBackendID = "default"
 
 type BackendConfig struct {
 	APIAddress  string `json:"apiAddress"`
@@ -108,23 +109,13 @@ func isValidBackendID(id string) bool {
 	return true
 }
 
-func snapshotBackendIDFromParameters(parameters map[string]string) string {
-	if parameters != nil {
-		backendID := parameters[common.BackendIDConfigKey]
-		if isValidBackendID(backendID) {
-			return backendID
-		}
-	}
-	return defaultSnapshotBackendID
-}
-
 func (controller *Controller) backendConfigByID(backendID string) (BackendConfig, error) {
 	if !isValidBackendID(backendID) {
 		return BackendConfig{}, fmt.Errorf("invalid backend ID %q", backendID)
 	}
 
 	if len(controller.backendConfigs) == 0 {
-		return BackendConfig{}, fmt.Errorf("no controller backend credentials are configured")
+		return BackendConfig{}, fmt.Errorf("controller backend credentials are required; ensure CONTROLLER_BACKEND_CONFIG_FILE is set")
 	}
 
 	config, ok := controller.backendConfigs[backendID]
@@ -169,34 +160,30 @@ func (controller *Controller) resolveCreateSnapshotBackendID(parameters map[stri
 }
 
 func (controller *Controller) resolveCredentials(req *csi.CreateSnapshotRequest) (map[string]string, error) {
-	if len(controller.backendConfigs) > 0 {
-		backendID, err := controller.resolveCreateSnapshotBackendID(req.GetParameters())
-		if err != nil {
-			return nil, err
-		}
-		config, err := controller.backendConfigByID(backendID)
-		if err != nil {
-			return nil, err
-		}
-		return config.credentials(), nil
+	if len(controller.backendConfigs) == 0 {
+		return nil, fmt.Errorf("controller backend credentials are required; ensure CONTROLLER_BACKEND_CONFIG_FILE is set")
 	}
 
-	if len(req.GetSecrets()) == 0 {
-		return nil, fmt.Errorf("CreateSnapshot secrets are required when controller backend credentials are not configured")
+	backendID, err := controller.resolveCreateSnapshotBackendID(req.GetParameters())
+	if err != nil {
+		return nil, err
 	}
-
-	return req.GetSecrets(), nil
+	config, err := controller.backendConfigByID(backendID)
+	if err != nil {
+		return nil, err
+	}
+	return config.credentials(), nil
 }
 
 func (controller *Controller) resolveCredentialsForSnapshotID(snapshotID string) (backendID, backendSnapshotID string, credentials map[string]string, err error) {
 	backendID, backendSnapshotID, err = parseSnapshotID(snapshotID)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	config, err := controller.backendConfigByID(backendID)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 
 	return backendID, backendSnapshotID, config.credentials(), nil
