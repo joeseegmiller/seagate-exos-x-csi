@@ -41,12 +41,12 @@ func loadBackendConfigsFromFile(path string) (map[string]BackendConfig, error) {
 
 	payload, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read backend config file: %w", err)
+		return nil, fmt.Errorf("failed to read backend config file %q: %w", path, err)
 	}
 
 	configs := map[string]BackendConfig{}
 	if err := json.Unmarshal(payload, &configs); err != nil {
-		return nil, fmt.Errorf("failed to parse backend config file: %w", err)
+		return nil, fmt.Errorf("failed to parse backend config JSON from %q: %w", path, err)
 	}
 
 	for backendID, config := range configs {

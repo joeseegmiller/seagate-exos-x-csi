@@ -90,7 +90,13 @@ func New() *Controller {
 		runPath:            fmt.Sprintf("/var/run/%s", common.PluginName),
 		nodeServiceClients: map[string]*grpc.ClientConn{},
 	}
-	controller.backendConfigs, controller.backendConfigErr = loadBackendConfigsFromFile(os.Getenv(common.ControllerBackendConfigFileEnvVar))
+	backendConfigPath := os.Getenv(common.ControllerBackendConfigFileEnvVar)
+	controller.backendConfigs, controller.backendConfigErr = loadBackendConfigsFromFile(backendConfigPath)
+	if controller.backendConfigErr != nil {
+		klog.Errorf("failed to load backend configs from %s: %v", backendConfigPath, controller.backendConfigErr)
+	} else {
+		klog.Infof("loaded %d backend configs", len(controller.backendConfigs))
+	}
 	controller.configureClientFn = controller.configureClient
 	controller.showSnapshotsFn = func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
 		response, respStatus, err := controller.client.ShowSnapshots(snapshotID, sourceVolumeID)
@@ -122,12 +128,6 @@ func New() *Controller {
 		}
 		return nil
 	}
-	if controller.backendConfigErr != nil {
-		klog.ErrorS(controller.backendConfigErr, "failed to load controller backend credentials")
-	} else if len(controller.backendConfigs) > 0 {
-		klog.InfoS("loaded controller backend credentials", "backendCount", len(controller.backendConfigs))
-	}
-
 	if err := os.MkdirAll(controller.runPath, 0755); err != nil {
 		panic(err)
 	}
