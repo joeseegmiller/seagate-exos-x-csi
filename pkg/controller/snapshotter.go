@@ -19,6 +19,8 @@ import (
 
 var invalidSnapshotNameChars = regexp.MustCompile(`[^a-z0-9-]`)
 
+const maxSnapshotNameLength = 32
+
 func sanitizeName(s string) string {
 	s = strings.ToLower(s)
 	return invalidSnapshotNameChars.ReplaceAllString(s, "-")
@@ -53,7 +55,30 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 	// Note: StorageClass parameters (pool, storageProtocol, volPrefix) are not
 	// available during CreateSnapshot. Snapshot creation operates on an existing
 	// volume, so backend determines pool and protocol from the source volume.
-	snapshotName := fmt.Sprintf("%s-%s", sourceVolumeId, namePart)
+        snapshotName := fmt.Sprintf("%s-%s", sourceVolumeId, namePart)
+
+        if len(snapshotName) > maxSnapshotNameLength {
+            suffix := "-" + namePart
+            maxBaseLen := maxSnapshotNameLength - len(suffix)
+
+            if maxBaseLen < 1 {
+                // fallback: trim suffix instead
+                maxSuffixLen := maxSnapshotNameLength - 2
+                if maxSuffixLen < 1 {
+                    maxSuffixLen = 1
+                }
+                if len(namePart) > maxSuffixLen {
+                    namePart = namePart[:maxSuffixLen]
+                }
+                snapshotName = fmt.Sprintf("%s-%s", sourceVolumeId[:1], namePart)
+            } else {
+                base := sourceVolumeId
+                if len(base) > maxBaseLen {
+                    base = base[:maxBaseLen]
+                }
+                snapshotName = base + suffix
+            }
+        }
 	if !common.ValidateName(snapshotName) {
 		return nil, status.Error(codes.InvalidArgument, "snapshot name contains invalid characters")
 	}
