@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -46,11 +45,6 @@ var csiMutexes = map[string]*sync.Mutex{
 
 var nonAuthenticatedMethods = []string{
 	"/csi.v1.Controller/ControllerGetCapabilities",
-	"/csi.v1.Controller/ListVolumes",
-	"/csi.v1.Controller/GetCapacity",
-	"/csi.v1.Controller/ControllerGetVolume",
-	"/csi.v1.Controller/DeleteSnapshot",
-	"/csi.v1.Controller/ListSnapshots",
 	"/csi.v1.Identity/Probe",
 	"/csi.v1.Identity/GetPluginInfo",
 	"/csi.v1.Identity/GetPluginCapabilities",
@@ -73,7 +67,6 @@ type Controller struct {
 
 // DriverCtx contains data common to most calls
 type DriverCtx struct {
-	Credentials map[string]string
 	Parameters  map[string]string
 	VolumeCaps  *[]*csi.VolumeCapability
 }
@@ -152,10 +145,6 @@ func New() *Controller {
 		}),
 		func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 			driverContext := DriverCtx{}
-			reqWithSecrets, ok := req.(common.WithSecrets)
-			if ok {
-				driverContext.Credentials = reqWithSecrets.GetSecrets()
-			}
 			if reqWithParameters, ok := req.(common.WithParameters); ok {
 				driverContext.Parameters = reqWithParameters.GetParameters()
 			}
@@ -278,11 +267,11 @@ func (controller *Controller) beginRoutine(ctx *DriverCtx, methodName string) er
 		return nil
 	}
 
-	if ctx.Credentials == nil {
-		return errors.New("missing API credentials")
+	if controller.backendConfigErr != nil {
+		return status.Errorf(codes.FailedPrecondition, "controller backend credentials are required; ensure CONTROLLER_BACKEND_CONFIG_FILE is set: %v", controller.backendConfigErr)
 	}
 
-	return controller.configureClientFn(ctx.Credentials)
+	return nil
 }
 
 func (controller *Controller) endRoutine() {

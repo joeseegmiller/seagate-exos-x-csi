@@ -17,10 +17,6 @@ import (
 
 // CreateSnapshot creates a snapshot of the given volume
 func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
-	if controller.backendConfigErr != nil {
-		return nil, status.Error(codes.FailedPrecondition, controller.backendConfigErr.Error())
-	}
-
 	parameters := req.GetParameters()
 	backendID, err := controller.resolveCreateSnapshotBackendID(parameters)
 	if err != nil {
@@ -108,10 +104,6 @@ func (controller *Controller) DeleteSnapshot(ctx context.Context, req *csi.Delet
 
 // ListSnapshots: list existing snapshots up to MaxEntries
 func (controller *Controller) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRequest) (*csi.ListSnapshotsResponse, error) {
-	if controller.backendConfigErr != nil {
-		return nil, status.Error(codes.FailedPrecondition, controller.backendConfigErr.Error())
-	}
-
 	sourceVolumeId, err := common.VolumeIdGetName(req.GetSourceVolumeId())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "snapshot SourceVolumeId is not valid")
@@ -163,10 +155,6 @@ func (controller *Controller) ListSnapshots(ctx context.Context, req *csi.ListSn
 }
 
 func (controller *Controller) prepareDeleteSnapshotClient(req *csi.DeleteSnapshotRequest) (string, error) {
-	if controller.backendConfigErr != nil {
-		return "", status.Error(codes.FailedPrecondition, controller.backendConfigErr.Error())
-	}
-
 	_, backendSnapshotID, err := parseSnapshotID(req.GetSnapshotId())
 	if err != nil {
 		return "", status.Error(codes.InvalidArgument, err.Error())

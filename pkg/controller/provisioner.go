@@ -52,8 +52,19 @@ func parseTopology(topologies []*csi.Topology, storageProtocol string, parameter
 
 // CreateVolume creates a new volume from the given request. The function is idempotent.
 func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-
 	parameters := req.GetParameters()
+	backendID, err := controller.resolveCreateSnapshotBackendID(parameters)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	config, err := controller.backendConfigByID(backendID)
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	credentials := config.credentials()
+	if err := controller.configureClientFn(credentials); err != nil {
+		return nil, err
+	}
 
 	volumeName, err := common.TranslateName(req.GetName(), parameters[common.VolumePrefixKey])
 	if err != nil {
