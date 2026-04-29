@@ -3,7 +3,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 
+	storageapi "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/api"
 	storageapitypes "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/common"
 
 	"github.com/Seagate/seagate-exos-x-csi/pkg/common"
@@ -38,8 +41,7 @@ func (driver *Controller) ControllerPublishVolume(ctx context.Context, req *csi.
 
 	klog.InfoS("attach request", "initiator(s)", initiators, "volume", volumeName)
 
-	lun, err := driver.client.PublishVolume(volumeName, initiators)
-
+	lun, err := driver.publishVolumeWithRetry(volumeName, initiators)
 	if err != nil {
 		return nil, err
 	}
@@ -85,4 +87,161 @@ func (driver *Controller) ControllerUnpublishVolume(ctx context.Context, req *cs
 
 	klog.Infof("successfully unmapped volume %s from all initiators", volumeName)
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
+}
+
+func (driver *Controller) publishVolumeWithRetry(volumeName string, initiators []string) (string, error) {
+	candidateLUN, err := driver.choosePublishLUN(initiators, volumeName)
+	if err != nil {
+		return "", err
+	}
+	klog.Infof("selected candidate LUN %d for volume %s", candidateLUN, volumeName)
+
+	maxRetryLUN := candidateLUN + 9
+	if maxRetryLUN >= storageapi.ApiMaximumLUN {
+		maxRetryLUN = storageapi.ApiMaximumLUN - 1
+	}
+
+	for lun := candidateLUN; lun <= maxRetryLUN; lun++ {
+		if lun != candidateLUN {
+			klog.Infof("retrying mapping with LUN %d", lun)
+		}
+		klog.V(1).InfoS("attempting volume mapping", "volumeName", volumeName, "initiators", initiators, "lun", lun)
+		actualLUN, err := driver.mapVolumeToInitiators(volumeName, initiators, lun)
+		if err != nil {
+			if isLUNAllocationFailure(err) {
+				klog.ErrorS(err, "mapping failed due to LUN conflict, retrying", "volumeName", volumeName, "lun", lun)
+				continue
+			}
+			return "", err
+		}
+		return strconv.Itoa(actualLUN), nil
+	}
+
+	return "", status.Errorf(codes.ResourceExhausted, "failed to map volume %s after retrying LUNs %d-%d", volumeName, candidateLUN, maxRetryLUN)
+}
+
+func (driver *Controller) mapVolumeToInitiators(volumeName string, initiators []string, lun int) (int, error) {
+	newlyMappedInitiators := make([]string, 0, len(initiators))
+	actualLUN := lun
+	for _, initiator := range initiators {
+		alreadyMapped, existingLUN, err := driver.isVolumeMappedToInitiator(volumeName, initiator, lun)
+		if err != nil {
+			driver.cleanupMappedInitiators(volumeName, newlyMappedInitiators)
+			return -1, err
+		}
+		if alreadyMapped {
+			actualLUN = existingLUN
+			klog.InfoS("volume already mapped to initiator", "volumeName", volumeName, "initiator", initiator, "lun", existingLUN)
+			continue
+		}
+
+		respStatus, err := driver.client.MapVolume(volumeName, initiator, "rw", lun)
+		if err != nil || respStatus == nil || respStatus.ReturnCode != 0 {
+			driver.cleanupMappedInitiators(volumeName, newlyMappedInitiators)
+			if respStatus != nil && respStatus.ReturnCode == storageapitypes.LUNOverlapErrorCode {
+				return -1, status.Errorf(codes.AlreadyExists, "mapping failed: returnCode=%d response=%s", respStatus.ReturnCode, respStatus.Response)
+			}
+			if respStatus != nil && respStatus.ReturnCode == storageapitypes.VolumeNotFoundErrorCode {
+				return -1, status.Errorf(codes.NotFound, "mapping failed: returnCode=%d response=%s", respStatus.ReturnCode, respStatus.Response)
+			}
+			if respStatus != nil {
+				return -1, status.Errorf(codes.Internal, "mapping failed: returnCode=%d response=%s", respStatus.ReturnCode, respStatus.Response)
+			}
+			if err == nil {
+				return -1, status.Error(codes.Internal, "mapping failed: empty response from storage API")
+			}
+			return -1, preserveStatusOr(codes.Internal, err)
+		}
+
+		klog.InfoS("successfully mapped initiator", "volumeName", volumeName, "initiator", initiator, "lun", lun)
+		newlyMappedInitiators = append(newlyMappedInitiators, initiator)
+	}
+
+	klog.InfoS("successfully mapped volume to all initiators", "volumeName", volumeName, "initiators", initiators, "lun", actualLUN)
+	return actualLUN, nil
+}
+
+func (driver *Controller) cleanupMappedInitiators(volumeName string, initiators []string) {
+	for _, initiator := range initiators {
+		respStatus, err := driver.client.UnmapVolume(volumeName, initiator)
+		if respStatus != nil && respStatus.ReturnCode == storageapitypes.VolumeNotFoundErrorCode {
+			continue
+		}
+		if err != nil {
+			klog.V(1).ErrorS(err, "failed to cleanup partial mapping", "volumeName", volumeName, "initiator", initiator, "returnCode", responseReturnCode(respStatus))
+		}
+	}
+}
+
+func (driver *Controller) isVolumeMappedToInitiator(volumeName, initiator string, lun int) (bool, int, error) {
+	volumes, _, err := driver.client.ShowHostMaps(initiator)
+	if err != nil {
+		return false, -1, err
+	}
+	for _, volume := range volumes {
+		if volume.Name == volumeName {
+			klog.Infof("volume already mapped to initiator at lun %d, reusing", volume.LUN)
+			return true, volume.LUN, nil
+		}
+	}
+	return false, -1, nil
+}
+
+func (driver *Controller) choosePublishLUN(initiators []string, volumeName string) (int, error) {
+	allVolumes := make([]storageapi.Volume, 0, 32)
+	for _, initiator := range initiators {
+		volumes, _, err := driver.client.ShowHostMaps(initiator)
+		if err != nil {
+			klog.ErrorS(err, "error looking for host maps", "initiator", initiator)
+			continue
+		}
+		allVolumes = append(allVolumes, volumes...)
+	}
+
+	sort.Slice(allVolumes, func(i, j int) bool {
+		return allVolumes[i].LUN < allVolumes[j].LUN
+	})
+
+	existingLUN := -1
+	for _, volume := range allVolumes {
+		if volume.Name != volumeName {
+			continue
+		}
+		if existingLUN < 0 {
+			existingLUN = volume.LUN
+			continue
+		}
+		if existingLUN != volume.LUN {
+			return -1, fmt.Errorf("found multiple LUNs (%d, %d) for volume %s", existingLUN, volume.LUN, volumeName)
+		}
+	}
+	if existingLUN >= 0 {
+		return existingLUN, nil
+	}
+	if len(allVolumes) == 0 {
+		return 1, nil
+	}
+	if allVolumes[len(allVolumes)-1].LUN+1 < storageapi.ApiMaximumLUN {
+		return allVolumes[len(allVolumes)-1].LUN + 1, nil
+	}
+	if allVolumes[0].LUN > 1 {
+		return 1, nil
+	}
+	for index := 1; index < len(allVolumes); index++ {
+		if allVolumes[index].LUN-allVolumes[index-1].LUN > 1 {
+			return allVolumes[index-1].LUN + 1, nil
+		}
+	}
+	return -1, status.Error(codes.ResourceExhausted, "no more available LUNs")
+}
+
+func isLUNAllocationFailure(err error) bool {
+	return status.Code(err) == codes.AlreadyExists
+}
+
+func responseReturnCode(respStatus *storageapitypes.ResponseStatus) int {
+	if respStatus == nil {
+		return 0
+	}
+	return respStatus.ReturnCode
 }
