@@ -61,10 +61,10 @@ type Controller struct {
 	knownInitiators    map[string]struct{}
 	backendConfigs     map[string]BackendConfig
 	backendConfigErr   error
-	configureClientFn  func(credentials map[string]string) error
-	showSnapshotsFn    func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error)
-	createSnapshotFn   func(sourceVolumeID, snapshotName string) error
-	deleteSnapshotFn   func(snapshotID string) error
+	configureClientFn  func(apiClient *storageapi.Client, credentials map[string]string) error
+	showSnapshotsFn    func(apiClient *storageapi.Client, snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error)
+	createSnapshotFn   func(apiClient *storageapi.Client, sourceVolumeID, snapshotName string) error
+	deleteSnapshotFn   func(apiClient *storageapi.Client, snapshotID string) error
 }
 
 // DriverCtx contains data common to most calls
@@ -81,6 +81,19 @@ func preserveStatusOr(code codes.Code, err error) error {
 		return err
 	}
 	return status.Error(code, err.Error())
+}
+
+func (controller *Controller) setClientContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return ctx
+}
+
+func (controller *Controller) requestClient(ctx context.Context) *storageapi.Client {
+	requestClient := *controller.client
+	requestClient.Ctx = controller.setClientContext(ctx)
+	return &requestClient
 }
 
 // New is a convenience fn for creating a controller driver
@@ -101,8 +114,8 @@ func New() *Controller {
 		klog.Infof("loaded %d backend configs", len(controller.backendConfigs))
 	}
 	controller.configureClientFn = controller.configureClient
-	controller.showSnapshotsFn = func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
-		response, respStatus, err := controller.client.ShowSnapshots(snapshotID, sourceVolumeID)
+	controller.showSnapshotsFn = func(apiClient *storageapi.Client, snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
+		response, respStatus, err := apiClient.ShowSnapshots(snapshotID, sourceVolumeID)
 		if err != nil {
 			if respStatus != nil && respStatus.ReturnCode == storageapitypes.BadInputParam {
 				return []storageapitypes.SnapshotObject{}, nil
@@ -111,8 +124,8 @@ func New() *Controller {
 		}
 		return response, nil
 	}
-	controller.createSnapshotFn = func(sourceVolumeID, snapshotName string) error {
-		respStatus, err := controller.client.CreateSnapshot(sourceVolumeID, snapshotName)
+	controller.createSnapshotFn = func(apiClient *storageapi.Client, sourceVolumeID, snapshotName string) error {
+		respStatus, err := apiClient.CreateSnapshot(sourceVolumeID, snapshotName)
 		if err != nil {
 			if respStatus != nil && respStatus.ReturnCode == storageapitypes.SnapshotAlreadyExists {
 				return nil
@@ -121,8 +134,8 @@ func New() *Controller {
 		}
 		return nil
 	}
-	controller.deleteSnapshotFn = func(snapshotID string) error {
-		respStatus, err := controller.client.DeleteSnapshot(snapshotID)
+	controller.deleteSnapshotFn = func(apiClient *storageapi.Client, snapshotID string) error {
+		respStatus, err := apiClient.DeleteSnapshot(snapshotID)
 		if err != nil {
 			if respStatus != nil && respStatus.ReturnCode == storageapitypes.SnapshotNotFoundErrorCode {
 				return preserveStatusOr(codes.NotFound, err)
@@ -221,7 +234,8 @@ func (controller *Controller) ValidateVolumeCapabilities(ctx context.Context, re
 	if len(req.GetVolumeCapabilities()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "cannot validate volume without capabilities")
 	}
-	_, _, err := controller.client.ShowVolumes(volumeName)
+	apiClient := controller.requestClient(ctx)
+	_, _, err := apiClient.ShowVolumes(volumeName)
 	if err != nil {
 		return nil, status.Error(codes.NotFound, "cannot validate volume not found")
 	}
@@ -281,7 +295,7 @@ func (controller *Controller) endRoutine() {
 	controller.client.HTTPClient.CloseIdleConnections()
 }
 
-func (controller *Controller) configureClient(credentials map[string]string) error {
+func (controller *Controller) configureClient(apiClient *storageapi.Client, credentials map[string]string) error {
 	username := string(credentials[common.UsernameSecretKey])
 	password := string(credentials[common.PasswordSecretKey])
 	apiAddr := string(credentials[common.APIAddressConfigKey])
@@ -304,19 +318,23 @@ func (controller *Controller) configureClient(credentials map[string]string) err
 	if secondaryapiAddr != "" {
 		apiAddresses = append(apiAddresses, secondaryapiAddr)
 	}
-	controller.client.StoreCredentials(apiAddresses, "", username, password)
+	apiClient.StoreCredentials(apiAddresses, "", username, password)
 
-	ctx := context.WithValue(context.Background(), client.ContextBasicAuth, client.BasicAuth{
+	requestCtx := apiClient.Ctx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	ctx := context.WithValue(requestCtx, client.ContextBasicAuth, client.BasicAuth{
 		UserName: username,
 		Password: password,
 	})
-	err := controller.client.Login(ctx)
+	err := apiClient.Login(ctx)
 	if err != nil {
 		return preserveStatusOr(codes.Unauthenticated, err)
 	}
 
 	klog.Info("login was successful")
-	err = controller.client.InitSystemInfo()
+	err = apiClient.InitSystemInfo()
 
 	return err
 }

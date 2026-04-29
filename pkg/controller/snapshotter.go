@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	storageapi "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/api"
 	storageapitypes "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/common"
 	"github.com/Seagate/seagate-exos-x-csi/pkg/common"
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -28,6 +29,7 @@ func sanitizeName(s string) string {
 
 // CreateSnapshot creates a snapshot of the given volume
 func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
+	apiClient := controller.requestClient(ctx)
 	parameters := req.GetParameters()
 	backendID, err := controller.resolveCreateSnapshotBackendID(parameters)
 	if err != nil {
@@ -55,40 +57,40 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 	// Note: StorageClass parameters (pool, storageProtocol, volPrefix) are not
 	// available during CreateSnapshot. Snapshot creation operates on an existing
 	// volume, so backend determines pool and protocol from the source volume.
-        snapshotName := fmt.Sprintf("%s-%s", sourceVolumeId, namePart)
+	snapshotName := fmt.Sprintf("%s-%s", sourceVolumeId, namePart)
 
-        if len(snapshotName) > maxSnapshotNameLength {
-            suffix := "-" + namePart
-            maxBaseLen := maxSnapshotNameLength - len(suffix)
+	if len(snapshotName) > maxSnapshotNameLength {
+		suffix := "-" + namePart
+		maxBaseLen := maxSnapshotNameLength - len(suffix)
 
-            if maxBaseLen < 1 {
-                // fallback: trim suffix instead
-                maxSuffixLen := maxSnapshotNameLength - 2
-                if maxSuffixLen < 1 {
-                    maxSuffixLen = 1
-                }
-                if len(namePart) > maxSuffixLen {
-                    namePart = namePart[:maxSuffixLen]
-                }
-                snapshotName = fmt.Sprintf("%s-%s", sourceVolumeId[:1], namePart)
-            } else {
-                base := sourceVolumeId
-                if len(base) > maxBaseLen {
-                    base = base[:maxBaseLen]
-                }
-                snapshotName = base + suffix
-            }
-        }
+		if maxBaseLen < 1 {
+			// fallback: trim suffix instead
+			maxSuffixLen := maxSnapshotNameLength - 2
+			if maxSuffixLen < 1 {
+				maxSuffixLen = 1
+			}
+			if len(namePart) > maxSuffixLen {
+				namePart = namePart[:maxSuffixLen]
+			}
+			snapshotName = fmt.Sprintf("%s-%s", sourceVolumeId[:1], namePart)
+		} else {
+			base := sourceVolumeId
+			if len(base) > maxBaseLen {
+				base = base[:maxBaseLen]
+			}
+			snapshotName = base + suffix
+		}
+	}
 	if !common.ValidateName(snapshotName) {
 		return nil, status.Error(codes.InvalidArgument, "snapshot name contains invalid characters")
 	}
 	klog.Infof("creating snapshot %q for volume %q", snapshotName, sourceVolumeId)
 
-	if err := controller.configureClientFn(credentials); err != nil {
+	if err := controller.configureClientFn(apiClient, credentials); err != nil {
 		return nil, err
 	}
 
-	err = controller.createSnapshotFn(sourceVolumeId, snapshotName)
+	err = controller.createSnapshotFn(apiClient, sourceVolumeId, snapshotName)
 	if err != nil {
 		if status.Code(err) != codes.AlreadyExists {
 			return nil, err
@@ -96,7 +98,7 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 	}
 
 	// The expectation is that show snapshots will return a single array item for the snapshot created
-	snapshots, err := controller.showSnapshotsFn(snapshotName, "")
+	snapshots, err := controller.showSnapshotsFn(apiClient, snapshotName, "")
 	if err != nil {
 		return nil, err
 	}
@@ -131,12 +133,13 @@ func (controller *Controller) DeleteSnapshot(ctx context.Context, req *csi.Delet
 		return nil, status.Error(codes.InvalidArgument, "DeleteSnapshot snapshot id is required")
 	}
 
-	backendSnapshotID, err := controller.prepareDeleteSnapshotClient(req)
+	apiClient := controller.requestClient(ctx)
+	backendSnapshotID, err := controller.prepareDeleteSnapshotClient(apiClient, req)
 	if err != nil {
 		return nil, err
 	}
 
-	err = controller.deleteSnapshotFn(backendSnapshotID)
+	err = controller.deleteSnapshotFn(apiClient, backendSnapshotID)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			klog.Infof("snapshot %s does not exist, assuming it has already been deleted", req.SnapshotId)
@@ -158,7 +161,8 @@ func (controller *Controller) ListSnapshots(ctx context.Context, req *csi.ListSn
 	startingToken, err := strconv.Atoi(req.StartingToken)
 	klog.V(2).Infof("ListSnapshots: MaxEntries=%v, StartingToken=%q|%d", req.MaxEntries, req.StartingToken, startingToken)
 
-	snapshots, err := controller.listSnapshotEntries(req, sourceVolumeId)
+	apiClient := controller.requestClient(ctx)
+	snapshots, err := controller.listSnapshotEntries(apiClient, req, sourceVolumeId)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +203,7 @@ func (controller *Controller) ListSnapshots(ctx context.Context, req *csi.ListSn
 	}, nil
 }
 
-func (controller *Controller) prepareDeleteSnapshotClient(req *csi.DeleteSnapshotRequest) (string, error) {
+func (controller *Controller) prepareDeleteSnapshotClient(apiClient *storageapi.Client, req *csi.DeleteSnapshotRequest) (string, error) {
 	_, backendSnapshotID, err := parseSnapshotID(req.GetSnapshotId())
 	if err != nil {
 		return "", status.Error(codes.InvalidArgument, err.Error())
@@ -209,19 +213,19 @@ func (controller *Controller) prepareDeleteSnapshotClient(req *csi.DeleteSnapsho
 	if err != nil {
 		return "", err
 	}
-	if err := controller.configureClientFn(credentials); err != nil {
+	if err := controller.configureClientFn(apiClient, credentials); err != nil {
 		return "", err
 	}
 	return backendSnapshotID, nil
 }
 
-func (controller *Controller) listSnapshotEntries(req *csi.ListSnapshotsRequest, sourceVolumeId string) ([]*csi.ListSnapshotsResponse_Entry, error) {
+func (controller *Controller) listSnapshotEntries(apiClient *storageapi.Client, req *csi.ListSnapshotsRequest, sourceVolumeId string) ([]*csi.ListSnapshotsResponse_Entry, error) {
 	if req.GetSnapshotId() != "" {
 		backendID, backendSnapshotID, credentials, err := controller.resolveCredentialsForSnapshotID(req.GetSnapshotId())
 		if err != nil {
 			return nil, err
 		}
-		return controller.listSnapshotEntriesForBackend(backendID, backendSnapshotID, sourceVolumeId, credentials)
+		return controller.listSnapshotEntriesForBackend(apiClient, backendID, backendSnapshotID, sourceVolumeId, credentials)
 	}
 
 	if len(controller.backendConfigs) == 0 {
@@ -233,15 +237,15 @@ func (controller *Controller) listSnapshotEntries(req *csi.ListSnapshotsRequest,
 	}
 
 	backendID := controller.sortedBackendIDs()[0]
-	return controller.listSnapshotEntriesForBackend(backendID, "", sourceVolumeId, controller.backendConfigs[backendID].credentials())
+	return controller.listSnapshotEntriesForBackend(apiClient, backendID, "", sourceVolumeId, controller.backendConfigs[backendID].credentials())
 }
 
-func (controller *Controller) listSnapshotEntriesForBackend(backendID, snapshotID, sourceVolumeId string, credentials map[string]string) ([]*csi.ListSnapshotsResponse_Entry, error) {
-	if err := controller.configureClientFn(credentials); err != nil {
+func (controller *Controller) listSnapshotEntriesForBackend(apiClient *storageapi.Client, backendID, snapshotID, sourceVolumeId string, credentials map[string]string) ([]*csi.ListSnapshotsResponse_Entry, error) {
+	if err := controller.configureClientFn(apiClient, credentials); err != nil {
 		return nil, err
 	}
 
-	response, err := controller.showSnapshotsFn(snapshotID, sourceVolumeId)
+	response, err := controller.showSnapshotsFn(apiClient, snapshotID, sourceVolumeId)
 	if err != nil {
 		return nil, err
 	}

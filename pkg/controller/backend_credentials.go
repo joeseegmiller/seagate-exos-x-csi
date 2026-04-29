@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -194,5 +195,5 @@ func (controller *Controller) configureBackendByID(backendID string) error {
 	if err != nil {
 		return err
 	}
-	return controller.configureClientFn(config.credentials())
+	return controller.configureClientFn(controller.requestClient(context.Background()), config.credentials())
 }

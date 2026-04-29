@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	storageapi "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/api"
 	storageapitypes "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/common"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -158,11 +159,11 @@ func TestListSnapshotsResolvesBackendCredentialsWithoutRequestSecrets(t *testing
 			"backend-b": {APIAddress: "https://array-b", Username: "user-b", Password: "pass-b"},
 		},
 	}
-	controller.configureClientFn = func(credentials map[string]string) error {
+	controller.configureClientFn = func(_ *storageapi.Client, credentials map[string]string) error {
 		configuredCredentials = append(configuredCredentials, credentials)
 		return nil
 	}
-	controller.showSnapshotsFn = func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
+	controller.showSnapshotsFn = func(_ *storageapi.Client, snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
 		if snapshotID != "snap-002" {
 			t.Fatalf("showSnapshotsFn got snapshotID=%q, want snap-002", snapshotID)
 		}
@@ -195,9 +196,9 @@ func TestCreateSnapshotFailsWithoutBackendIDInMultiBackendMode(t *testing.T) {
 			"backend-a": {APIAddress: "https://array-a", Username: "user-a", Password: "pass-a"},
 			"backend-b": {APIAddress: "https://array-b", Username: "user-b", Password: "pass-b"},
 		},
-		configureClientFn: func(credentials map[string]string) error { return nil },
+		configureClientFn: func(_ *storageapi.Client, credentials map[string]string) error { return nil },
 	}
-	controller.createSnapshotFn = func(sourceVolumeID, snapshotName string) error {
+	controller.createSnapshotFn = func(_ *storageapi.Client, sourceVolumeID, snapshotName string) error {
 		t.Fatal("createSnapshotFn should not be called without backendID")
 		return nil
 	}
@@ -217,13 +218,13 @@ func TestCreateSnapshotFailsWithoutBackendIDInMultiBackendMode(t *testing.T) {
 
 func TestCreateSnapshotRequiresConfiguredBackends(t *testing.T) {
 	controller := &Controller{
-		configureClientFn: func(credentials map[string]string) error { return nil },
+		configureClientFn: func(_ *storageapi.Client, credentials map[string]string) error { return nil },
 	}
-	controller.createSnapshotFn = func(sourceVolumeID, snapshotName string) error {
+	controller.createSnapshotFn = func(_ *storageapi.Client, sourceVolumeID, snapshotName string) error {
 		t.Fatal("createSnapshotFn should not be called without configured backends")
 		return nil
 	}
-	controller.showSnapshotsFn = func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
+	controller.showSnapshotsFn = func(_ *storageapi.Client, snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
 		t.Fatal("showSnapshotsFn should not be called without configured backends")
 		return nil, nil
 	}
@@ -248,8 +249,8 @@ func TestListSnapshotsRejectsMalformedSnapshotID(t *testing.T) {
 		backendConfigs: map[string]BackendConfig{
 			"backend-a": {APIAddress: "https://array-a", Username: "user-a", Password: "pass-a"},
 		},
-		configureClientFn: func(credentials map[string]string) error { return nil },
-		showSnapshotsFn:   func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) { return nil, nil },
+		configureClientFn: func(_ *storageapi.Client, credentials map[string]string) error { return nil },
+		showSnapshotsFn:   func(_ *storageapi.Client, snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) { return nil, nil },
 	}
 
 	_, err := controller.ListSnapshots(nil, &csi.ListSnapshotsRequest{SnapshotId: "backend-a|snap|bad"})
@@ -267,8 +268,8 @@ func TestListSnapshotsWithoutSnapshotIDIsUnimplementedForMultiBackend(t *testing
 			"backend-a": {APIAddress: "https://array-a", Username: "user-a", Password: "pass-a"},
 			"backend-b": {APIAddress: "https://array-b", Username: "user-b", Password: "pass-b"},
 		},
-		configureClientFn: func(credentials map[string]string) error { return nil },
-		showSnapshotsFn:   func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) { return nil, nil },
+		configureClientFn: func(_ *storageapi.Client, credentials map[string]string) error { return nil },
+		showSnapshotsFn:   func(_ *storageapi.Client, snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) { return nil, nil },
 	}
 
 	_, err := controller.ListSnapshots(nil, &csi.ListSnapshotsRequest{})
