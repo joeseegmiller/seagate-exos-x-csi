@@ -89,15 +89,6 @@ func (driver *Controller) ControllerUnpublishVolume(ctx context.Context, req *cs
 		return nil, err
 	}
 
-	stillMapped, err := driver.isVolumeMappedElsewhere(apiClient, volumeName, initiators)
-	if err != nil {
-		return nil, err
-	}
-	if stillMapped {
-		klog.Infof("skipping unmap; volume %s is still in use by other initiators", volumeName)
-		return &csi.ControllerUnpublishVolumeResponse{}, nil
-	}
-
 	klog.InfoS("unmapping volume from initiator", "volumeName", volumeName, "initiators", initiators)
 	for _, initiator := range initiators {
 		status, err := apiClient.UnmapVolume(volumeName, initiator)
@@ -114,34 +105,6 @@ func (driver *Controller) ControllerUnpublishVolume(ctx context.Context, req *cs
 
 	klog.Infof("successfully unmapped volume %s from all initiators", volumeName)
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
-}
-
-func (driver *Controller) isVolumeMappedElsewhere(apiClient *storageapi.Client, volumeName string, excludeInitiators []string) (bool, error) {
-	excluded := make(map[string]struct{}, len(excludeInitiators))
-	for _, initiator := range excludeInitiators {
-		excluded[initiator] = struct{}{}
-	}
-
-	knownInitiators := driver.getKnownInitiators(excluded)
-	if len(knownInitiators) == 0 {
-		klog.Infof("skipping unmap; cannot reliably determine mapping state for volume %s", volumeName)
-		return true, nil
-	}
-
-	for _, initiator := range knownInitiators {
-		volumes, _, err := apiClient.ShowHostMaps(initiator)
-		if err != nil {
-			return false, err
-		}
-		for _, volume := range volumes {
-			if volume.Name == volumeName {
-				klog.V(1).InfoS("volume mapped on other initiators, skipping unmap", "volumeName", volumeName, "otherInitiator", initiator, "lun", volume.LUN)
-				return true, nil
-			}
-		}
-	}
-
-	return false, nil
 }
 
 func (driver *Controller) recordKnownInitiators(initiators []string) {
