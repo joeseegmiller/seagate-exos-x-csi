@@ -122,7 +122,7 @@ func (driver *Controller) publishVolumeWithRetry(volumeName string, initiators [
 
 func (driver *Controller) mapVolumeToInitiators(volumeName string, initiators []string, lun int) (int, error) {
 	newlyMappedInitiators := make([]string, 0, len(initiators))
-	actualLUN := lun
+	actualLUN := -1
 	for _, initiator := range initiators {
 		alreadyMapped, existingLUN, err := driver.isVolumeMappedToInitiator(volumeName, initiator, lun)
 		if err != nil {
@@ -130,12 +130,26 @@ func (driver *Controller) mapVolumeToInitiators(volumeName string, initiators []
 			return -1, err
 		}
 		if alreadyMapped {
-			actualLUN = existingLUN
+			if actualLUN == -1 {
+				actualLUN = existingLUN
+			} else if actualLUN != existingLUN {
+				driver.cleanupMappedInitiators(volumeName, newlyMappedInitiators)
+				return -1, status.Errorf(
+					codes.FailedPrecondition,
+					"inconsistent LUN mapping for volume %s: found %d and %d",
+					volumeName, actualLUN, existingLUN,
+				)
+			}
 			klog.InfoS("volume already mapped to initiator", "volumeName", volumeName, "initiator", initiator, "lun", existingLUN)
 			continue
 		}
 
-		respStatus, err := driver.client.MapVolume(volumeName, initiator, "rw", lun)
+		targetLUN := lun
+		if actualLUN != -1 {
+			targetLUN = actualLUN
+		}
+
+		respStatus, err := driver.client.MapVolume(volumeName, initiator, "rw", targetLUN)
 		if err != nil || respStatus == nil || respStatus.ReturnCode != 0 {
 			driver.cleanupMappedInitiators(volumeName, newlyMappedInitiators)
 			if respStatus != nil && respStatus.ReturnCode == storageapitypes.LUNOverlapErrorCode {
@@ -153,8 +167,15 @@ func (driver *Controller) mapVolumeToInitiators(volumeName string, initiators []
 			return -1, preserveStatusOr(codes.Internal, err)
 		}
 
-		klog.InfoS("successfully mapped initiator", "volumeName", volumeName, "initiator", initiator, "lun", lun)
+		if actualLUN == -1 {
+			actualLUN = targetLUN
+		}
+		klog.InfoS("successfully mapped initiator", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN)
 		newlyMappedInitiators = append(newlyMappedInitiators, initiator)
+	}
+
+	if actualLUN == -1 {
+		return -1, status.Error(codes.Internal, "no LUN assigned after mapping")
 	}
 
 	klog.InfoS("successfully mapped volume to all initiators", "volumeName", volumeName, "initiators", initiators, "lun", actualLUN)
@@ -174,16 +195,18 @@ func (driver *Controller) cleanupMappedInitiators(volumeName string, initiators 
 }
 
 func (driver *Controller) isVolumeMappedToInitiator(volumeName, initiator string, lun int) (bool, int, error) {
+	klog.V(1).InfoS("checking existing mappings for initiator", "volumeName", volumeName, "initiator", initiator)
 	volumes, _, err := driver.client.ShowHostMaps(initiator)
 	if err != nil {
 		return false, -1, err
 	}
 	for _, volume := range volumes {
 		if volume.Name == volumeName {
-			klog.Infof("volume already mapped to initiator at lun %d, reusing", volume.LUN)
+			klog.Infof("volume already mapped to this initiator at lun %d", volume.LUN)
 			return true, volume.LUN, nil
 		}
 	}
+	klog.V(1).InfoS("volume not mapped to this initiator, will map", "volumeName", volumeName, "initiator", initiator, "candidateLUN", lun)
 	return false, -1, nil
 }
 
