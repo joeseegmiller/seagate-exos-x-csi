@@ -283,7 +283,7 @@ func (controller *Controller) ValidateVolumeCapabilities(ctx context.Context, re
 	if err != nil {
 		return nil, err
 	}
-	_, _, err := apiClient.ShowVolumes(volumeName)
+	_, _, err = apiClient.ShowVolumes(volumeName)
 	if err != nil {
 		return nil, status.Error(codes.NotFound, "cannot validate volume not found")
 	}
