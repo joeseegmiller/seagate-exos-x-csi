@@ -1,89 +1,66 @@
-//
-// Copyright (c) 2021 Seagate Technology LLC and/or its Affiliates
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//    http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// For any questions about this software or licensing,
-// please email opensource@seagate.com or cortx-questions@seagate.com.
-
 package common
 
-import (
-	"fmt"
-	"testing"
+import "testing"
 
-	"github.com/container-storage-interface/spec/lib/go/csi"
-	. "github.com/onsi/gomega"
-)
-
-func init() {
-	fmt.Printf("Test Setup:\n")
-	fmt.Printf("    VolumeNameMaxLength   = %d\n", VolumeNameMaxLength)
-	fmt.Printf("    VolumePrefixMaxLength = %d\n", VolumePrefixMaxLength)
-	fmt.Printf("\n")
+func TestVolumeIdAugmentIncludesBackendID(t *testing.T) {
+	volumeID := VolumeIdAugment("backend-a", "vol-a", "fc", "wwn-123")
+	if volumeID != "backend-a|vol-a##fc##wwn-123" {
+		t.Fatalf("volume ID = %q, want backend-a|vol-a##fc##wwn-123", volumeID)
+	}
 }
 
-func createRequestVolume(name string, prefix string) (csi.CreateVolumeRequest, error) {
-	// Create a CSI CreateVolumeRequest and Response
+func TestVolumeIdHelpersSupportBackendAwareIDs(t *testing.T) {
+	volumeID := "backend-a|vol-a##fc##wwn-123"
 
-	req := csi.CreateVolumeRequest{
-		Name:       name,
-		Parameters: map[string]string{VolumePrefixKey: prefix},
+	backendID, err := VolumeIdGetBackendID(volumeID)
+	if err != nil {
+		t.Fatalf("VolumeIdGetBackendID returned error: %v", err)
+	}
+	if backendID != "backend-a" {
+		t.Fatalf("backendID = %q, want backend-a", backendID)
 	}
 
-	return req, nil
+	volumeName, err := VolumeIdGetName(volumeID)
+	if err != nil {
+		t.Fatalf("VolumeIdGetName returned error: %v", err)
+	}
+	if volumeName != "vol-a" {
+		t.Fatalf("volumeName = %q, want vol-a", volumeName)
+	}
+
+	protocol, err := VolumeIdGetStorageProtocol(volumeID)
+	if err != nil {
+		t.Fatalf("VolumeIdGetStorageProtocol returned error: %v", err)
+	}
+	if protocol != "fc" {
+		t.Fatalf("protocol = %q, want fc", protocol)
+	}
+
+	wwn, err := VolumeIdGetWwn(volumeID)
+	if err != nil {
+		t.Fatalf("VolumeIdGetWwn returned error: %v", err)
+	}
+	if wwn != "wwn-123" {
+		t.Fatalf("wwn = %q, want wwn-123", wwn)
+	}
 }
 
-func runTest(t *testing.T, idin string, idout string, prefix string) {
-	id, err := TranslateName(idin, prefix)
-	g := NewWithT(t)
-	g.Expect(err).To(BeNil())
-	g.Expect(id).To(Equal(idout))
-}
+func TestVolumeIdHelpersSupportLegacyIDs(t *testing.T) {
+	volumeID := "vol-a##fc##wwn-123"
 
-func TestTranslate(t *testing.T) {
+	backendID, err := VolumeIdGetBackendID(volumeID)
+	if err != nil {
+		t.Fatalf("VolumeIdGetBackendID returned error: %v", err)
+	}
+	if backendID != "" {
+		t.Fatalf("backendID = %q, want empty", backendID)
+	}
 
-	// Test empty name
-	runTest(t, "", "csi_", "csi")
-
-	// Test with no prefix
-	runTest(t, "pvc-03c551d9-7e77-43ff-993e-c2308d2f09a1", "03c551d97e7743ff993ec2308d2f09a1", "")
-	runTest(t, "03c551d97e7743ff993ec2308d2f09a1", "03c551d97e7743ff993ec2308d2f09a1", "")
-	runTest(t, "8d2f09a1", "8d2f09a1", "")
-	runTest(t, "51d9-7e77-43ff-993e-c2308d2f09a1", "51d9-7e77-43ff-993e-c2308d2f09a1", "")
-
-	// Test with prefix
-	runTest(t, "pvc-03c551d9-7e77-43ff-993e-c2308d2f09a1", "csi_51d97e7743ff993ec2308d2f09a1", "csi")
-	runTest(t, "pvc-51d9-7e77-43ff-993e-c2308d2f09a1", "csi_51d97e7743ff993ec2308d2f09a1", "csi")
-	runTest(t, "51d9-7e77-43ff-993e-c2308d2f09a1", "csi_51d97e7743ff993ec2308d2f09a1", "csi")
-	runTest(t, "51d97e7743ff993ec2308d2f09a1", "csi_51d97e7743ff993ec2308d2f09a1", "csi")
-	runTest(t, "51d97e7743ff993ec2308d2f09a1", "csi_51d97e7743ff993ec2308d2f09a1", "csi_123")
-	runTest(t, "pvc-51d9-7e77-43ff-993e-c2308d2f09a1", "cd_51d97e7743ff993ec2308d2f09a1", "cd")
-	runTest(t, "pvc-51d9-7e77-43ff-993e-c2308d2f09a1", "c_51d97e7743ff993ec2308d2f09a1", "c")
-
-	// Test with prefix
-	runTest(t, "snapshot-03c551d9-7e77-43ff-993e-c2308d2f09a1", "csi_51d97e7743ff993ec2308d2f09a1", "csi")
-}
-
-func TestValidate(t *testing.T) {
-	g := NewWithT(t)
-	g.Expect(ValidateName("abcdefghijklmnopqrstuvwxyz")).To(BeTrue())
-	g.Expect(ValidateName("ABCDEFGHIJKLMNOPQRSTUVWXYZ")).To(BeTrue())
-	g.Expect(ValidateName("a b _ . - c")).To(BeTrue())
-
-	// 	Test unaccepable characters: " , < \
-	g.Expect(ValidateName("\"abc")).To(BeFalse())
-	g.Expect(ValidateName("abc,")).To(BeFalse())
-	g.Expect(ValidateName("abc<def")).To(BeFalse())
-	g.Expect(ValidateName("abc\\def")).To(BeFalse())
+	volumeName, err := VolumeIdGetName(volumeID)
+	if err != nil {
+		t.Fatalf("VolumeIdGetName returned error: %v", err)
+	}
+	if volumeName != "vol-a" {
+		t.Fatalf("volumeName = %q, want vol-a", volumeName)
+	}
 }

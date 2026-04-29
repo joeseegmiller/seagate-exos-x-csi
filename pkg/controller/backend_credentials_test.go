@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,10 +9,25 @@ import (
 
 	storageapi "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/api"
 	storageapitypes "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/common"
+	"github.com/Seagate/seagate-exos-x-csi/pkg/common"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func markTestClientConfigured(apiClient *storageapi.Client) {
+	apiClient.Ctx = context.Background()
+
+	value := reflect.ValueOf(apiClient)
+	if !value.IsValid() || value.IsNil() {
+		return
+	}
+	infoField := value.Elem().FieldByName("Info")
+	if !infoField.IsValid() || !infoField.CanSet() || infoField.Kind() != reflect.Ptr || !infoField.IsNil() {
+		return
+	}
+	infoField.Set(reflect.New(infoField.Type().Elem()))
+}
 
 func TestParseSnapshotID(t *testing.T) {
 	tests := []struct {
@@ -93,6 +109,40 @@ func TestResolveCredentialsForSnapshotID(t *testing.T) {
 	}
 }
 
+func TestParseVolumeID(t *testing.T) {
+	tests := []struct {
+		name           string
+		id             string
+		wantBackendID  string
+		wantInnerID    string
+		wantErr        bool
+	}{
+		{name: "backend-aware volume ID", id: "backend-a|vol-a##fc##wwn-123", wantBackendID: "backend-a", wantInnerID: "vol-a##fc##wwn-123"},
+		{name: "legacy volume ID", id: "vol-a##fc##wwn-123", wantInnerID: "vol-a##fc##wwn-123"},
+		{name: "extra delimiters remain in inner ID", id: "backend-a|vol-a|extra", wantBackendID: "backend-a", wantInnerID: "vol-a|extra"},
+		{name: "empty backend", id: "|vol-a##fc##wwn-123", wantErr: true},
+		{name: "empty inner ID", id: "backend-a|", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backendID, innerID, err := common.ParseVolumeID(tt.id)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", tt.id)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if backendID != tt.wantBackendID || innerID != tt.wantInnerID {
+				t.Fatalf("got backendID=%q innerID=%q, want backendID=%q innerID=%q", backendID, innerID, tt.wantBackendID, tt.wantInnerID)
+			}
+		})
+	}
+}
+
 func TestResolveCredentialsForSnapshotIDReturnsFailedPreconditionForUnknownBackend(t *testing.T) {
 	controller := &Controller{
 		backendConfigs: map[string]BackendConfig{
@@ -159,7 +209,8 @@ func TestListSnapshotsResolvesBackendCredentialsWithoutRequestSecrets(t *testing
 			"backend-b": {APIAddress: "https://array-b", Username: "user-b", Password: "pass-b"},
 		},
 	}
-	controller.configureClientFn = func(_ *storageapi.Client, credentials map[string]string) error {
+	controller.configureClientFn = func(apiClient *storageapi.Client, credentials map[string]string) error {
+		markTestClientConfigured(apiClient)
 		configuredCredentials = append(configuredCredentials, credentials)
 		return nil
 	}
@@ -196,7 +247,10 @@ func TestCreateSnapshotFailsWithoutBackendIDInMultiBackendMode(t *testing.T) {
 			"backend-a": {APIAddress: "https://array-a", Username: "user-a", Password: "pass-a"},
 			"backend-b": {APIAddress: "https://array-b", Username: "user-b", Password: "pass-b"},
 		},
-		configureClientFn: func(_ *storageapi.Client, credentials map[string]string) error { return nil },
+		configureClientFn: func(apiClient *storageapi.Client, credentials map[string]string) error {
+			markTestClientConfigured(apiClient)
+			return nil
+		},
 	}
 	controller.createSnapshotFn = func(_ *storageapi.Client, sourceVolumeID, snapshotName string) error {
 		t.Fatal("createSnapshotFn should not be called without backendID")
@@ -218,7 +272,10 @@ func TestCreateSnapshotFailsWithoutBackendIDInMultiBackendMode(t *testing.T) {
 
 func TestCreateSnapshotRequiresConfiguredBackends(t *testing.T) {
 	controller := &Controller{
-		configureClientFn: func(_ *storageapi.Client, credentials map[string]string) error { return nil },
+		configureClientFn: func(apiClient *storageapi.Client, credentials map[string]string) error {
+			markTestClientConfigured(apiClient)
+			return nil
+		},
 	}
 	controller.createSnapshotFn = func(_ *storageapi.Client, sourceVolumeID, snapshotName string) error {
 		t.Fatal("createSnapshotFn should not be called without configured backends")
@@ -249,7 +306,10 @@ func TestListSnapshotsRejectsMalformedSnapshotID(t *testing.T) {
 		backendConfigs: map[string]BackendConfig{
 			"backend-a": {APIAddress: "https://array-a", Username: "user-a", Password: "pass-a"},
 		},
-		configureClientFn: func(_ *storageapi.Client, credentials map[string]string) error { return nil },
+		configureClientFn: func(apiClient *storageapi.Client, credentials map[string]string) error {
+			markTestClientConfigured(apiClient)
+			return nil
+		},
 		showSnapshotsFn:   func(_ *storageapi.Client, snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) { return nil, nil },
 	}
 
@@ -268,7 +328,10 @@ func TestListSnapshotsWithoutSnapshotIDIsUnimplementedForMultiBackend(t *testing
 			"backend-a": {APIAddress: "https://array-a", Username: "user-a", Password: "pass-a"},
 			"backend-b": {APIAddress: "https://array-b", Username: "user-b", Password: "pass-b"},
 		},
-		configureClientFn: func(_ *storageapi.Client, credentials map[string]string) error { return nil },
+		configureClientFn: func(apiClient *storageapi.Client, credentials map[string]string) error {
+			markTestClientConfigured(apiClient)
+			return nil
+		},
 		showSnapshotsFn:   func(_ *storageapi.Client, snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) { return nil, nil },
 	}
 

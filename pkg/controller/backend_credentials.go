@@ -191,9 +191,6 @@ func (controller *Controller) resolveCredentialsForSnapshotID(snapshotID string)
 }
 
 func (controller *Controller) configureBackendByID(backendID string) error {
-	config, err := controller.backendConfigByID(backendID)
-	if err != nil {
-		return err
-	}
-	return controller.configureClientFn(controller.requestClient(context.Background()), config.credentials())
+	_, err := controller.getConfiguredClient(context.Background(), backendID)
+	return err
 }

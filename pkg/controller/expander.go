@@ -13,10 +13,17 @@ import (
 
 // ControllerExpandVolume expands a volume to the given new size
 func (controller *Controller) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest) (*csi.ControllerExpandVolumeResponse, error) {
-	apiClient := controller.requestClient(ctx)
 	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
 	if volumeName == "" {
 		return nil, status.Error(codes.InvalidArgument, "cannot expand a volume with an empty ID")
+	}
+	backendID, err := controller.resolveBackendIDForVolumeID(req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
+	if err != nil {
+		return nil, err
 	}
 	klog.Infof("expanding volume %q", volumeName)
 

@@ -52,18 +52,13 @@ func parseTopology(topologies []*csi.Topology, storageProtocol string, parameter
 
 // CreateVolume creates a new volume from the given request. The function is idempotent.
 func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-	apiClient := controller.requestClient(ctx)
 	parameters := req.GetParameters()
 	backendID, err := controller.resolveCreateSnapshotBackendID(parameters)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	config, err := controller.backendConfigByID(backendID)
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
 	if err != nil {
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
-	}
-	credentials := config.credentials()
-	if err := controller.configureClientFn(apiClient, credentials); err != nil {
 		return nil, err
 	}
 
@@ -175,7 +170,7 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 		klog.V(2).Infof("Storing iSCSI iqn: %s, portals: %v", targetId, portals)
 	}
 
-	volumeId := common.VolumeIdAugment(volumeName, storageProtocol, wwn)
+	volumeId := common.VolumeIdAugment(backendID, volumeName, storageProtocol, wwn)
 
 	volume := &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
@@ -195,10 +190,19 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 
 // DeleteVolume deletes the given volume. The function is idempotent.
 func (controller *Controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
-	apiClient := controller.requestClient(ctx)
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "cannot delete volume with empty ID")
 	}
+
+	backendID, err := controller.resolveBackendIDForVolumeID(req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
+	if err != nil {
+		return nil, err
+	}
+
 	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
 	klog.Infof("deleting volume %s", volumeName)
 

@@ -96,6 +96,47 @@ func (controller *Controller) requestClient(ctx context.Context) *storageapi.Cli
 	return &requestClient
 }
 
+func (controller *Controller) getConfiguredClient(ctx context.Context, backendID string) (*storageapi.Client, error) {
+	apiClient := controller.requestClient(ctx)
+	if apiClient == nil {
+		return nil, status.Error(codes.Internal, "api client not initialized")
+	}
+	config, err := controller.backendConfigByID(backendID)
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if err := controller.configureClientFn(apiClient, config.credentials()); err != nil {
+		return nil, err
+	}
+	if apiClient.Ctx == nil {
+		return nil, status.Error(codes.Internal, "api client context not initialized")
+	}
+	if apiClient.Info == nil {
+		return nil, status.Error(codes.Internal, "api client system info not initialized")
+	}
+	apiAddresses := []string{config.APIAddress}
+	if config.APIAddressB != "" {
+		apiAddresses = append(apiAddresses, config.APIAddressB)
+	}
+	klog.V(1).InfoS("configured EXOS client", "backendID", backendID, "apiAddresses", apiAddresses)
+	return apiClient, nil
+}
+
+func (controller *Controller) resolveBackendIDForVolumeID(volumeID string) (string, error) {
+	backendID, _, err := common.ParseVolumeID(volumeID)
+	if err != nil {
+		return "", status.Error(codes.InvalidArgument, err.Error())
+	}
+	if backendID == "" {
+		if len(controller.backendConfigs) != 1 {
+			return "", status.Error(codes.FailedPrecondition, "legacy volume ID without backend information cannot be resolved in multi-backend configuration; recreate volume or migrate to backend-aware VolumeId format")
+		}
+		klog.V(1).Infof("using single-backend fallback for legacy volume ID %q", volumeID)
+		backendID = controller.sortedBackendIDs()[0]
+	}
+	return backendID, nil
+}
+
 // New is a convenience fn for creating a controller driver
 func New() *Controller {
 	client := storageapi.NewClient()
@@ -234,7 +275,14 @@ func (controller *Controller) ValidateVolumeCapabilities(ctx context.Context, re
 	if len(req.GetVolumeCapabilities()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "cannot validate volume without capabilities")
 	}
-	apiClient := controller.requestClient(ctx)
+	backendID, err := controller.resolveBackendIDForVolumeID(req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
+	if err != nil {
+		return nil, err
+	}
 	_, _, err := apiClient.ShowVolumes(volumeName)
 	if err != nil {
 		return nil, status.Error(codes.NotFound, "cannot validate volume not found")
@@ -334,9 +382,13 @@ func (controller *Controller) configureClient(apiClient *storageapi.Client, cred
 	}
 
 	klog.Info("login was successful")
-	err = apiClient.InitSystemInfo()
+	if apiClient.Info == nil {
+		if err := apiClient.InitSystemInfo(); err != nil {
+			return err
+		}
+	}
 
-	return err
+	return nil
 }
 
 func runPreflightChecks(parameters map[string]string, capabilities *[]*csi.VolumeCapability) error {

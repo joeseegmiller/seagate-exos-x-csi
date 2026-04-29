@@ -41,7 +41,14 @@ func (driver *Controller) ControllerPublishVolume(ctx context.Context, req *csi.
 
 	klog.InfoS("attach request", "initiator(s)", initiators, "volume", volumeName)
 	driver.recordKnownInitiators(initiators)
-	apiClient := driver.requestClient(ctx)
+	backendID, err := driver.resolveBackendIDForVolumeID(req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	apiClient, err := driver.getConfiguredClient(ctx, backendID)
+	if err != nil {
+		return nil, err
+	}
 
 	lun, err := driver.publishVolumeWithRetry(apiClient, volumeName, initiators)
 	if err != nil {
@@ -73,7 +80,14 @@ func (driver *Controller) ControllerUnpublishVolume(ctx context.Context, req *cs
 		klog.ErrorS(err, "error getting initiators from the node", "nodeIP", nodeIP, "storageProtocol", storageProtocol)
 	}
 	driver.recordKnownInitiators(initiators)
-	apiClient := driver.requestClient(ctx)
+	backendID, err := driver.resolveBackendIDForVolumeID(req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	apiClient, err := driver.getConfiguredClient(ctx, backendID)
+	if err != nil {
+		return nil, err
+	}
 
 	stillMapped, err := driver.isVolumeMappedElsewhere(apiClient, volumeName, initiators)
 	if err != nil {

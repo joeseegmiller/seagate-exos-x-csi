@@ -26,6 +26,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
+const volumeIDBackendDelimiter = "|"
+
 // ValidateName verifies that the string only includes spaces and printable UTF-8 characters except: " , < \
 func ValidateName(s string) bool {
 	klog.V(2).Infof("ValidateName %q", s)
@@ -100,7 +102,11 @@ func TranslateName(name, prefix string) (string, error) {
 
 // VolumeIdGetName: Decode the augmented volume identifier and return the name only
 func VolumeIdGetName(volumeId string) (string, error) {
-	tokens := strings.Split(volumeId, AugmentKey)
+	_, innerID, err := ParseVolumeID(volumeId)
+	if err != nil {
+		return "", err
+	}
+	tokens := strings.Split(innerID, AugmentKey)
 
 	if len(tokens) > 0 {
 		return tokens[0], nil
@@ -111,7 +117,11 @@ func VolumeIdGetName(volumeId string) (string, error) {
 
 // VolumeIdGetStorageProtocol: Decode the augmented volume identifier and return the storage protocol only
 func VolumeIdGetStorageProtocol(volumeId string) (string, error) {
-	tokens := strings.Split(volumeId, AugmentKey)
+	_, innerID, err := ParseVolumeID(volumeId)
+	if err != nil {
+		return "", err
+	}
+	tokens := strings.Split(innerID, AugmentKey)
 
 	if len(tokens) > 1 {
 		return tokens[1], nil
@@ -122,7 +132,11 @@ func VolumeIdGetStorageProtocol(volumeId string) (string, error) {
 
 // VolumeIdGetWwn: Decode the augmented volume identifier and return the WWN
 func VolumeIdGetWwn(volumeId string) (string, error) {
-	tokens := strings.Split(volumeId, AugmentKey)
+	_, innerID, err := ParseVolumeID(volumeId)
+	if err != nil {
+		return "", err
+	}
+	tokens := strings.Split(innerID, AugmentKey)
 
 	if len(tokens) > 2 {
 		return tokens[2], nil
@@ -131,12 +145,39 @@ func VolumeIdGetWwn(volumeId string) (string, error) {
 	}
 }
 
-// VolumeIdAugment: Extend the volume name by augmenting it with storage protocol
-func VolumeIdAugment(volumename, storageprotocol, wwn string) string {
+// VolumeIdGetBackendID: Decode the backend-aware volume identifier and return the backend ID if present
+func VolumeIdGetBackendID(volumeId string) (string, error) {
+	backendID, _, err := ParseVolumeID(volumeId)
+	return backendID, err
+}
 
-	volumeId := volumename + AugmentKey + storageprotocol + AugmentKey + wwn
+// VolumeIdAugment: Extend the volume name by augmenting it with storage protocol
+func VolumeIdAugment(backendID, volumename, storageprotocol, wwn string) string {
+
+	innerID := volumename + AugmentKey + storageprotocol + AugmentKey + wwn
+	volumeId := innerID
+	if backendID != "" {
+		volumeId = backendID + volumeIDBackendDelimiter + innerID
+	}
 	klog.V(2).Infof("VolumeIdAugment: %s", volumeId)
 	return volumeId
+}
+
+// ParseVolumeID decodes an optional backend-aware volume ID and returns the backend ID and inner legacy ID.
+func ParseVolumeID(volumeId string) (backendID, innerID string, err error) {
+	if volumeId == "" {
+		return "", "", fmt.Errorf("volume ID is empty")
+	}
+
+	parts := strings.SplitN(volumeId, volumeIDBackendDelimiter, 2)
+	if len(parts) == 1 {
+		return "", volumeId, nil
+	}
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("invalid backend-aware volume ID %q", volumeId)
+	}
+
+	return parts[0], parts[1], nil
 }
 
 // We use IQN for Node ID, but IQN can contain colons which are not allowed in the topology map

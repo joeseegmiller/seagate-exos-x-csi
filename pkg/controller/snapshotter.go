@@ -29,17 +29,15 @@ func sanitizeName(s string) string {
 
 // CreateSnapshot creates a snapshot of the given volume
 func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
-	apiClient := controller.requestClient(ctx)
 	parameters := req.GetParameters()
 	backendID, err := controller.resolveCreateSnapshotBackendID(parameters)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	config, err := controller.backendConfigByID(backendID)
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
 	if err != nil {
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
+		return nil, err
 	}
-	credentials := config.credentials()
 
 	sourceVolumeId, err := common.VolumeIdGetName(req.GetSourceVolumeId())
 	if sourceVolumeId == "" || err != nil {
@@ -86,10 +84,6 @@ func (controller *Controller) CreateSnapshot(ctx context.Context, req *csi.Creat
 	}
 	klog.Infof("creating snapshot %q for volume %q", snapshotName, sourceVolumeId)
 
-	if err := controller.configureClientFn(apiClient, credentials); err != nil {
-		return nil, err
-	}
-
 	err = controller.createSnapshotFn(apiClient, sourceVolumeId, snapshotName)
 	if err != nil {
 		if status.Code(err) != codes.AlreadyExists {
@@ -133,8 +127,11 @@ func (controller *Controller) DeleteSnapshot(ctx context.Context, req *csi.Delet
 		return nil, status.Error(codes.InvalidArgument, "DeleteSnapshot snapshot id is required")
 	}
 
-	apiClient := controller.requestClient(ctx)
-	backendSnapshotID, err := controller.prepareDeleteSnapshotClient(apiClient, req)
+	backendID, backendSnapshotID, err := controller.prepareDeleteSnapshotClient(req)
+	if err != nil {
+		return nil, err
+	}
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
 	if err != nil {
 		return nil, err
 	}
@@ -161,8 +158,7 @@ func (controller *Controller) ListSnapshots(ctx context.Context, req *csi.ListSn
 	startingToken, err := strconv.Atoi(req.StartingToken)
 	klog.V(2).Infof("ListSnapshots: MaxEntries=%v, StartingToken=%q|%d", req.MaxEntries, req.StartingToken, startingToken)
 
-	apiClient := controller.requestClient(ctx)
-	snapshots, err := controller.listSnapshotEntries(apiClient, req, sourceVolumeId)
+	snapshots, err := controller.listSnapshotEntries(ctx, req, sourceVolumeId)
 	if err != nil {
 		return nil, err
 	}
@@ -203,29 +199,25 @@ func (controller *Controller) ListSnapshots(ctx context.Context, req *csi.ListSn
 	}, nil
 }
 
-func (controller *Controller) prepareDeleteSnapshotClient(apiClient *storageapi.Client, req *csi.DeleteSnapshotRequest) (string, error) {
-	_, backendSnapshotID, err := parseSnapshotID(req.GetSnapshotId())
+func (controller *Controller) prepareDeleteSnapshotClient(req *csi.DeleteSnapshotRequest) (string, string, error) {
+	backendID, backendSnapshotID, err := parseSnapshotID(req.GetSnapshotId())
 	if err != nil {
-		return "", status.Error(codes.InvalidArgument, err.Error())
+		return "", "", status.Error(codes.InvalidArgument, err.Error())
 	}
-
-	_, _, credentials, err := controller.resolveCredentialsForSnapshotID(req.GetSnapshotId())
-	if err != nil {
-		return "", err
-	}
-	if err := controller.configureClientFn(apiClient, credentials); err != nil {
-		return "", err
-	}
-	return backendSnapshotID, nil
+	return backendID, backendSnapshotID, nil
 }
 
-func (controller *Controller) listSnapshotEntries(apiClient *storageapi.Client, req *csi.ListSnapshotsRequest, sourceVolumeId string) ([]*csi.ListSnapshotsResponse_Entry, error) {
+func (controller *Controller) listSnapshotEntries(ctx context.Context, req *csi.ListSnapshotsRequest, sourceVolumeId string) ([]*csi.ListSnapshotsResponse_Entry, error) {
 	if req.GetSnapshotId() != "" {
-		backendID, backendSnapshotID, credentials, err := controller.resolveCredentialsForSnapshotID(req.GetSnapshotId())
+		backendID, backendSnapshotID, err := parseSnapshotID(req.GetSnapshotId())
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		apiClient, err := controller.getConfiguredClient(ctx, backendID)
 		if err != nil {
 			return nil, err
 		}
-		return controller.listSnapshotEntriesForBackend(apiClient, backendID, backendSnapshotID, sourceVolumeId, credentials)
+		return controller.listSnapshotEntriesForBackend(apiClient, backendID, backendSnapshotID, sourceVolumeId)
 	}
 
 	if len(controller.backendConfigs) == 0 {
@@ -237,14 +229,14 @@ func (controller *Controller) listSnapshotEntries(apiClient *storageapi.Client, 
 	}
 
 	backendID := controller.sortedBackendIDs()[0]
-	return controller.listSnapshotEntriesForBackend(apiClient, backendID, "", sourceVolumeId, controller.backendConfigs[backendID].credentials())
-}
-
-func (controller *Controller) listSnapshotEntriesForBackend(apiClient *storageapi.Client, backendID, snapshotID, sourceVolumeId string, credentials map[string]string) ([]*csi.ListSnapshotsResponse_Entry, error) {
-	if err := controller.configureClientFn(apiClient, credentials); err != nil {
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
+	if err != nil {
 		return nil, err
 	}
+	return controller.listSnapshotEntriesForBackend(apiClient, backendID, "", sourceVolumeId)
+}
 
+func (controller *Controller) listSnapshotEntriesForBackend(apiClient *storageapi.Client, backendID, snapshotID, sourceVolumeId string) ([]*csi.ListSnapshotsResponse_Entry, error) {
 	response, err := controller.showSnapshotsFn(apiClient, snapshotID, sourceVolumeId)
 	if err != nil {
 		return nil, err
