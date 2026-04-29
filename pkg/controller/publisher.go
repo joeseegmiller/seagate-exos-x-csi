@@ -40,6 +40,7 @@ func (driver *Controller) ControllerPublishVolume(ctx context.Context, req *csi.
 	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
 
 	klog.InfoS("attach request", "initiator(s)", initiators, "volume", volumeName)
+	driver.recordKnownInitiators(initiators)
 
 	lun, err := driver.publishVolumeWithRetry(volumeName, initiators)
 	if err != nil {
@@ -70,6 +71,16 @@ func (driver *Controller) ControllerUnpublishVolume(ctx context.Context, req *cs
 	if err != nil {
 		klog.ErrorS(err, "error getting initiators from the node", "nodeIP", nodeIP, "storageProtocol", storageProtocol)
 	}
+	driver.recordKnownInitiators(initiators)
+
+	stillMapped, err := driver.isVolumeMappedElsewhere(volumeName, initiators)
+	if err != nil {
+		return nil, err
+	}
+	if stillMapped {
+		klog.Infof("skipping unmap; volume %s is still in use by other initiators", volumeName)
+		return &csi.ControllerUnpublishVolumeResponse{}, nil
+	}
 
 	klog.InfoS("unmapping volume from initiator", "volumeName", volumeName, "initiators", initiators)
 	for _, initiator := range initiators {
@@ -87,6 +98,60 @@ func (driver *Controller) ControllerUnpublishVolume(ctx context.Context, req *cs
 
 	klog.Infof("successfully unmapped volume %s from all initiators", volumeName)
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
+}
+
+func (driver *Controller) isVolumeMappedElsewhere(volumeName string, excludeInitiators []string) (bool, error) {
+	excluded := make(map[string]struct{}, len(excludeInitiators))
+	for _, initiator := range excludeInitiators {
+		excluded[initiator] = struct{}{}
+	}
+
+	knownInitiators := driver.getKnownInitiators(excluded)
+	if len(knownInitiators) == 0 {
+		klog.Infof("skipping unmap; cannot reliably determine mapping state for volume %s", volumeName)
+		return true, nil
+	}
+
+	for _, initiator := range knownInitiators {
+		volumes, _, err := driver.client.ShowHostMaps(initiator)
+		if err != nil {
+			return false, err
+		}
+		for _, volume := range volumes {
+			if volume.Name == volumeName {
+				klog.V(1).InfoS("volume mapped on other initiators, skipping unmap", "volumeName", volumeName, "otherInitiator", initiator, "lun", volume.LUN)
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func (driver *Controller) recordKnownInitiators(initiators []string) {
+	driver.knownInitiatorsMu.Lock()
+	defer driver.knownInitiatorsMu.Unlock()
+	for _, initiator := range initiators {
+		if initiator == "" {
+			continue
+		}
+		driver.knownInitiators[initiator] = struct{}{}
+	}
+}
+
+func (driver *Controller) getKnownInitiators(excluded map[string]struct{}) []string {
+	driver.knownInitiatorsMu.RLock()
+	defer driver.knownInitiatorsMu.RUnlock()
+
+	initiators := make([]string, 0, len(driver.knownInitiators))
+	for initiator := range driver.knownInitiators {
+		if _, skip := excluded[initiator]; skip {
+			continue
+		}
+		initiators = append(initiators, initiator)
+	}
+	sort.Strings(initiators)
+	return initiators
 }
 
 func (driver *Controller) publishVolumeWithRetry(volumeName string, initiators []string) (string, error) {

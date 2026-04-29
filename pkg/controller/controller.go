@@ -57,6 +57,8 @@ type Controller struct {
 	client             *storageapi.Client
 	nodeServiceClients map[string]*grpc.ClientConn
 	runPath            string
+	knownInitiatorsMu  sync.RWMutex
+	knownInitiators    map[string]struct{}
 	backendConfigs     map[string]BackendConfig
 	backendConfigErr   error
 	configureClientFn  func(credentials map[string]string) error
@@ -89,6 +91,7 @@ func New() *Controller {
 		client:             client,
 		runPath:            fmt.Sprintf("/var/run/%s", common.PluginName),
 		nodeServiceClients: map[string]*grpc.ClientConn{},
+		knownInitiators:    map[string]struct{}{},
 	}
 	backendConfigPath := os.Getenv(common.ControllerBackendConfigFileEnvVar)
 	controller.backendConfigs, controller.backendConfigErr = loadBackendConfigsFromFile(backendConfigPath)
