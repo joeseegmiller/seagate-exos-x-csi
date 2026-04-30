@@ -38,6 +38,24 @@ func (driver *Controller) ControllerPublishVolume(ctx context.Context, req *csi.
 	}
 
 	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
+	nodeIP := req.GetNodeId()
+	inFlightKey := volumeName + "|" + nodeIP
+	driver.inFlightMu.Lock()
+	driver.inFlightPublishes[inFlightKey]++
+	driver.inFlightMu.Unlock()
+        defer func() {
+            driver.inFlightMu.Lock()
+            defer driver.inFlightMu.Unlock()
+        
+            if count, ok := driver.inFlightPublishes[inFlightKey]; ok {
+                count--
+                if count <= 0 {
+                    delete(driver.inFlightPublishes, inFlightKey)
+                } else {
+                    driver.inFlightPublishes[inFlightKey] = count
+                }
+            }
+        }()	
 
 	klog.InfoS("attach request", "initiator(s)", initiators, "volume", volumeName)
 	driver.recordKnownInitiators(initiators)
@@ -67,8 +85,20 @@ func (driver *Controller) ControllerUnpublishVolume(ctx context.Context, req *cs
 	}
 
 	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
-	volumeWWN, _ := common.VolumeIdGetWwn(req.GetVolumeId())
 	nodeIP := req.GetNodeId()
+	inFlightKey := volumeName + "|" + nodeIP
+	driver.inFlightMu.Lock()
+	inFlight := driver.inFlightPublishes[inFlightKey]
+	driver.inFlightMu.Unlock()
+	if inFlight > 0 {
+		klog.V(1).InfoS("skipping unmap; publish still in progress",
+			"volumeName", volumeName,
+			"nodeID", nodeIP,
+			"inFlightPublishes", inFlight,
+		)
+		return &csi.ControllerUnpublishVolumeResponse{}, nil
+	}
+	volumeWWN, _ := common.VolumeIdGetWwn(req.GetVolumeId())
 	storageProtocol, err := common.VolumeIdGetStorageProtocol(req.GetVolumeId())
 	if err != nil {
 		klog.ErrorS(err, "No storage protocol found in ControllerUnpublishVolume", "storage protocol", storageProtocol, "volume ID:", req.GetVolumeId())

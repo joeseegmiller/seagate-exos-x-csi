@@ -57,6 +57,8 @@ type Controller struct {
 	client             *storageapi.Client
 	nodeServiceClients map[string]*grpc.ClientConn
 	runPath            string
+	inFlightMu         sync.Mutex
+	inFlightPublishes  map[string]int
 	knownInitiatorsMu  sync.RWMutex
 	knownInitiators    map[string]struct{}
 	backendConfigs     map[string]BackendConfig
@@ -144,6 +146,7 @@ func New() *Controller {
 		Driver:             common.NewDriver(client.Collector),
 		client:             client,
 		runPath:            fmt.Sprintf("/var/run/%s", common.PluginName),
+		inFlightPublishes:  map[string]int{},
 		nodeServiceClients: map[string]*grpc.ClientConn{},
 		knownInitiators:    map[string]struct{}{},
 	}
