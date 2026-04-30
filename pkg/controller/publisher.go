@@ -38,7 +38,6 @@ func (driver *Controller) ControllerPublishVolume(ctx context.Context, req *csi.
 	}
 
 	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
-	nodeIP := req.GetNodeId()
 	inFlightKey := volumeName + "|" + nodeIP
 	driver.inFlightMu.Lock()
 	driver.inFlightPublishes[inFlightKey]++
