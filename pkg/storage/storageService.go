@@ -48,6 +48,8 @@ var (
 	readDir            = os.ReadDir
 	readFile           = os.ReadFile
 	evalSymlinks       = filepath.EvalSymlinks
+	attachDiscoveryTimeout       = 90 * time.Second
+	attachDiscoveryRetryInterval = 3 * time.Second
 )
 
 const diskByIDPath = "/dev/disk/by-id"
@@ -256,6 +258,53 @@ func ValidateAttachedDeviceWWN(volumeName, devicePath, expectedWWN string) error
 	}
 
 	return nil
+}	
+
+func isTransientDiscoveryFailure(path string, err error) bool {
+	if err == nil {
+		return strings.TrimSpace(path) == ""
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "no sas disk found")
+}
+
+func waitForDiscoveryRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func attachWithDiscoveryRetry(ctx context.Context, volumeName, expectedWWN string, attach func() (string, error)) (string, error) {
+	start := time.Now()
+	attempt := 1
+
+	for {
+		path, err := attach()
+		if !isTransientDiscoveryFailure(path, err) {
+			return path, err
+		}
+		if time.Since(start) >= attachDiscoveryTimeout {
+			return "", fmt.Errorf("no SAS disk found")
+		}
+
+		klog.V(1).InfoS("waiting for FC/SAS device discovery",
+			"volumeName", volumeName,
+			"expectedWWN", expectedWWN,
+			"attempt", attempt,
+			"elapsed", time.Since(start).String(),
+		)
+
+		if err := waitForDiscoveryRetry(ctx, attachDiscoveryRetryInterval); err != nil {
+			return "", err
+		}
+		attempt++
+	}
 }
 
 // FindDeviceFormat:

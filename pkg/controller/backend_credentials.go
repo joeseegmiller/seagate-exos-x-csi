@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,9 @@ import (
 	"strings"
 
 	"github.com/Seagate/seagate-exos-x-csi/pkg/common"
+	"github.com/container-storage-interface/spec/lib/go/csi"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const snapshotIDDelimiter = "|"
@@ -38,12 +42,12 @@ func loadBackendConfigsFromFile(path string) (map[string]BackendConfig, error) {
 
 	payload, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read backend config file: %w", err)
+		return nil, fmt.Errorf("failed to read backend config file %q: %w", path, err)
 	}
 
 	configs := map[string]BackendConfig{}
 	if err := json.Unmarshal(payload, &configs); err != nil {
-		return nil, fmt.Errorf("failed to parse backend config file: %w", err)
+		return nil, fmt.Errorf("failed to parse backend config JSON from %q: %w", path, err)
 	}
 
 	for backendID, config := range configs {
@@ -112,7 +116,7 @@ func (controller *Controller) backendConfigByID(backendID string) (BackendConfig
 	}
 
 	if len(controller.backendConfigs) == 0 {
-		return BackendConfig{}, fmt.Errorf("no controller backend credentials are configured")
+		return BackendConfig{}, fmt.Errorf("controller backend credentials are required; ensure CONTROLLER_BACKEND_CONFIG_FILE is set")
 	}
 
 	config, ok := controller.backendConfigs[backendID]
@@ -133,10 +137,6 @@ func (controller *Controller) sortedBackendIDs() []string {
 }
 
 func (controller *Controller) resolveCreateSnapshotBackendID(parameters map[string]string) (string, error) {
-	if len(controller.backendConfigs) == 0 {
-		return "", fmt.Errorf("no controller backend credentials are configured")
-	}
-
 	backendID := ""
 	if parameters != nil {
 		backendID = parameters[common.BackendIDConfigKey]
@@ -160,24 +160,37 @@ func (controller *Controller) resolveCreateSnapshotBackendID(parameters map[stri
 	return backendID, nil
 }
 
+func (controller *Controller) resolveCredentials(req *csi.CreateSnapshotRequest) (map[string]string, error) {
+	if len(controller.backendConfigs) == 0 {
+		return nil, fmt.Errorf("controller backend credentials are required; ensure CONTROLLER_BACKEND_CONFIG_FILE is set")
+	}
+
+	backendID, err := controller.resolveCreateSnapshotBackendID(req.GetParameters())
+	if err != nil {
+		return nil, err
+	}
+	config, err := controller.backendConfigByID(backendID)
+	if err != nil {
+		return nil, err
+	}
+	return config.credentials(), nil
+}
+
 func (controller *Controller) resolveCredentialsForSnapshotID(snapshotID string) (backendID, backendSnapshotID string, credentials map[string]string, err error) {
 	backendID, backendSnapshotID, err = parseSnapshotID(snapshotID)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	config, err := controller.backendConfigByID(backendID)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 
 	return backendID, backendSnapshotID, config.credentials(), nil
 }
 
 func (controller *Controller) configureBackendByID(backendID string) error {
-	config, err := controller.backendConfigByID(backendID)
-	if err != nil {
-		return err
-	}
-	return controller.configureClientFn(config.credentials())
+	_, err := controller.getConfiguredClient(context.Background(), backendID)
+	return err
 }

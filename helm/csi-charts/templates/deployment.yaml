@@ -32,11 +32,16 @@ spec:
           env:
             - name: CSI_NODE_SERVICE_PORT
               value: "978"
+            - name: CONTROLLER_BACKEND_CONFIG_FILE
+              value: /etc/csi/backends.json                
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
             - name: csi-run-dir
               mountPath: /var/run/csi-exos-x.seagate.com
+            - name: backend-config
+              mountPath: /etc/csi
+              readOnly: true                
           ports:
             - containerPort: 9842
               name: metrics
@@ -92,3 +97,6 @@ spec:
         - name: csi-run-dir
           hostPath:
             path: /var/run/csi-exos-x.seagate.com
+        - name: backend-config
+          secret:
+            secretName: exos-backend-config              

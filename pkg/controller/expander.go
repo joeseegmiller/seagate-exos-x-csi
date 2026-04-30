@@ -17,6 +17,14 @@ func (controller *Controller) ControllerExpandVolume(ctx context.Context, req *c
 	if volumeName == "" {
 		return nil, status.Error(codes.InvalidArgument, "cannot expand a volume with an empty ID")
 	}
+	backendID, err := controller.resolveBackendIDForVolumeID(req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
+	if err != nil {
+		return nil, err
+	}
 	klog.Infof("expanding volume %q", volumeName)
 
 	newSize := req.GetCapacityRange().GetRequiredBytes()
@@ -25,7 +33,7 @@ func (controller *Controller) ControllerExpandVolume(ctx context.Context, req *c
 	}
 	klog.V(2).Infof("requested size: %d bytes", newSize)
 
-	response, _, err := controller.client.ShowVolumes(volumeName)
+	response, _, err := apiClient.ShowVolumes(volumeName)
 	var expansionSize int64
 	if err != nil {
 		return nil, err
@@ -43,7 +51,7 @@ func (controller *Controller) ControllerExpandVolume(ctx context.Context, req *c
 	}
 
 	expansionSizeStr := getSizeStr(expansionSize)
-	if _, err := controller.client.ExpandVolume(volumeName, expansionSizeStr); err != nil {
+	if _, err := apiClient.ExpandVolume(volumeName, expansionSizeStr); err != nil {
 		return nil, err
 	}
 

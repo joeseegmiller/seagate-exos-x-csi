@@ -58,8 +58,12 @@ func (fc *fcStorage) AttachStorage(ctx context.Context, req *csi.NodePublishVolu
 	klog.InfoS("initiating FC connection...")
 	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
 	wwn, _ := common.VolumeIdGetWwn(req.GetVolumeId())
-	connector := &fclib.Connector{VolumeWWN: wwn}
-	path, err := fclib.Attach(ctx, connector, &fclib.OSioHandler{})
+	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
+	var connector *fclib.Connector
+	path, err := attachWithDiscoveryRetry(ctx, volumeName, wwn, func() (string, error) {
+		connector = &fclib.Connector{VolumeWWN: wwn}
+		return fclib.Attach(ctx, connector, &fclib.OSioHandler{})
+	})
 	if err != nil {
 		return path, err
 	}

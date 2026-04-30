@@ -52,16 +52,33 @@ func parseTopology(topologies []*csi.Topology, storageProtocol string, parameter
 
 // CreateVolume creates a new volume from the given request. The function is idempotent.
 func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-
 	parameters := req.GetParameters()
+	backendID, err := controller.resolveCreateSnapshotBackendID(parameters)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
+	if err != nil {
+		return nil, err
+	}
 
-	volumeName, err := common.TranslateName(req.GetName(), parameters[common.VolumePrefixKey])
+	pool := parameters[common.PoolConfigKey]
+	storageProtocol := storage.ValidateStorageProtocol(parameters[common.StorageProtocolKey])
+	volPrefix := parameters[common.VolumePrefixKey]
+	if pool == "" {
+		return nil, status.Error(codes.InvalidArgument, "'pool' is missing from configuration")
+	}
+	if storageProtocol == "" {
+		return nil, status.Error(codes.InvalidArgument, "'storageProtocol' is missing from configuration")
+	}
+	if volPrefix == "" {
+		return nil, status.Error(codes.InvalidArgument, "'volPrefix' is missing from configuration")
+	}
+
+	volumeName, err := common.TranslateName(req.GetName(), volPrefix)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "translate volume name contains invalid characters")
 	}
-
-	// Extract the storage interface protocol to be used for this volume (iscsi, fc, sas, etc)
-	storageProtocol := storage.ValidateStorageProtocol(parameters[common.StorageProtocolKey])
 
 	if !common.ValidateName(volumeName) {
 		return nil, status.Error(codes.InvalidArgument, "volume name contains invalid characters")
@@ -74,12 +91,11 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 
 	size := req.GetCapacityRange().GetRequiredBytes()
 	sizeStr := getSizeStr(size)
-	pool := parameters[common.PoolConfigKey]
 	wwn := ""
 
 	klog.Infof("creating volume %q (size %s) pool %q using protocol (%s)", volumeName, sizeStr, pool, storageProtocol)
 
-	volumeExists, err := controller.client.CheckVolumeExists(volumeName, size)
+	volumeExists, err := apiClient.CheckVolumeExists(volumeName, size)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +125,7 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 			if err != nil {
 				return nil, err
 			}
-			apiStatus, err2 := controller.client.CopyVolume(sourceName, volumeName, parameters[common.PoolConfigKey])
+			apiStatus, err2 := apiClient.CopyVolume(sourceName, volumeName, pool)
 			if err2 != nil {
 				klog.Infof("-- CopyVolume apiStatus.ReturnCode %v", apiStatus.ReturnCode)
 				if apiStatus != nil && apiStatus.ReturnCode == storageapitypes.SnapshotNotFoundErrorCode {
@@ -120,7 +136,7 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 			}
 
 		} else {
-			volume, apiStatus, err2 := controller.client.CreateVolume(volumeName, sizeStr, parameters[common.PoolConfigKey])
+			volume, apiStatus, err2 := apiClient.CreateVolume(volumeName, sizeStr, pool)
 			if err2 != nil {
 				return nil, err2
 			} else if apiStatus.ResponseTypeNumeric != 0 {
@@ -132,7 +148,7 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 		}
 	}
 	if wwn == "" {
-		wwn, err = controller.client.GetVolumeWwn(volumeName)
+		wwn, err = apiClient.GetVolumeWwn(volumeName)
 	}
 	if err != nil {
 		klog.ErrorS(err, "Error retrieving WWN of new volume", "volumeName", volumeName)
@@ -141,12 +157,12 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 
 	if storageProtocol == common.StorageProtocolISCSI {
 		// Fill iSCSI context parameters
-		targetId, err1 := storageapi.GetTargetId(controller.client.Info, "iSCSI")
+		targetId, err1 := storageapi.GetTargetId(apiClient.Info, "iSCSI")
 		if err1 != nil {
 			klog.Errorf("++ GetTargetId error: %v", err1)
 		}
 		req.GetParameters()["iqn"] = targetId
-		portals, err2 := controller.client.GetPortals()
+		portals, err2 := apiClient.GetPortals()
 		if err2 != nil {
 			klog.Errorf("++ GetPortals error: %v", err2)
 		}
@@ -154,7 +170,7 @@ func (controller *Controller) CreateVolume(ctx context.Context, req *csi.CreateV
 		klog.V(2).Infof("Storing iSCSI iqn: %s, portals: %v", targetId, portals)
 	}
 
-	volumeId := common.VolumeIdAugment(volumeName, storageProtocol, wwn)
+	volumeId := common.VolumeIdAugment(backendID, volumeName, storageProtocol, wwn)
 
 	volume := &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
@@ -177,10 +193,20 @@ func (controller *Controller) DeleteVolume(ctx context.Context, req *csi.DeleteV
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "cannot delete volume with empty ID")
 	}
+
+	backendID, err := controller.resolveBackendIDForVolumeID(req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
+	if err != nil {
+		return nil, err
+	}
+
 	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
 	klog.Infof("deleting volume %s", volumeName)
 
-	respStatus, err := controller.client.DeleteVolume(volumeName)
+	respStatus, err := apiClient.DeleteVolume(volumeName)
 	if err != nil {
 		if respStatus != nil {
 			if respStatus.ReturnCode == storageapitypes.VolumeNotFoundErrorCode {

@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -46,11 +45,6 @@ var csiMutexes = map[string]*sync.Mutex{
 
 var nonAuthenticatedMethods = []string{
 	"/csi.v1.Controller/ControllerGetCapabilities",
-	"/csi.v1.Controller/ListVolumes",
-	"/csi.v1.Controller/GetCapacity",
-	"/csi.v1.Controller/ControllerGetVolume",
-	"/csi.v1.Controller/DeleteSnapshot",
-	"/csi.v1.Controller/ListSnapshots",
 	"/csi.v1.Identity/Probe",
 	"/csi.v1.Identity/GetPluginInfo",
 	"/csi.v1.Identity/GetPluginCapabilities",
@@ -63,19 +57,84 @@ type Controller struct {
 	client             *storageapi.Client
 	nodeServiceClients map[string]*grpc.ClientConn
 	runPath            string
+	knownInitiatorsMu  sync.RWMutex
+	knownInitiators    map[string]struct{}
 	backendConfigs     map[string]BackendConfig
 	backendConfigErr   error
-	configureClientFn  func(credentials map[string]string) error
-	showSnapshotsFn    func(snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, *storageapitypes.Status, error)
-	createSnapshotFn   func(sourceVolumeID, snapshotName string) (*storageapitypes.Status, error)
-	deleteSnapshotFn   func(snapshotID string) (*storageapitypes.Status, error)
+	configureClientFn  func(apiClient *storageapi.Client, credentials map[string]string) error
+	showSnapshotsFn    func(apiClient *storageapi.Client, snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error)
+	createSnapshotFn   func(apiClient *storageapi.Client, sourceVolumeID, snapshotName string) error
+	deleteSnapshotFn   func(apiClient *storageapi.Client, snapshotID string) error
 }
 
 // DriverCtx contains data common to most calls
 type DriverCtx struct {
-	Credentials map[string]string
 	Parameters  map[string]string
 	VolumeCaps  *[]*csi.VolumeCapability
+}
+
+func preserveStatusOr(code codes.Code, err error) error {
+	if err == nil {
+		return nil
+	}
+	if status.Code(err) != codes.OK {
+		return err
+	}
+	return status.Error(code, err.Error())
+}
+
+func (controller *Controller) setClientContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return ctx
+}
+
+func (controller *Controller) requestClient(ctx context.Context) *storageapi.Client {
+	requestClient := *controller.client
+	requestClient.Ctx = controller.setClientContext(ctx)
+	return &requestClient
+}
+
+func (controller *Controller) getConfiguredClient(ctx context.Context, backendID string) (*storageapi.Client, error) {
+	apiClient := controller.requestClient(ctx)
+	if apiClient == nil {
+		return nil, status.Error(codes.Internal, "api client not initialized")
+	}
+	config, err := controller.backendConfigByID(backendID)
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if err := controller.configureClientFn(apiClient, config.credentials()); err != nil {
+		return nil, err
+	}
+	if apiClient.Ctx == nil {
+		return nil, status.Error(codes.Internal, "api client context not initialized")
+	}
+	if apiClient.Info == nil {
+		return nil, status.Error(codes.Internal, "api client system info not initialized")
+	}
+	apiAddresses := []string{config.APIAddress}
+	if config.APIAddressB != "" {
+		apiAddresses = append(apiAddresses, config.APIAddressB)
+	}
+	klog.V(1).InfoS("configured EXOS client", "backendID", backendID, "apiAddresses", apiAddresses)
+	return apiClient, nil
+}
+
+func (controller *Controller) resolveBackendIDForVolumeID(volumeID string) (string, error) {
+	backendID, _, err := common.ParseVolumeID(volumeID)
+	if err != nil {
+		return "", status.Error(codes.InvalidArgument, err.Error())
+	}
+	if backendID == "" {
+		if len(controller.backendConfigs) != 1 {
+			return "", status.Error(codes.FailedPrecondition, "legacy volume ID without backend information cannot be resolved in multi-backend configuration; recreate volume or migrate to backend-aware VolumeId format")
+		}
+		klog.V(1).Infof("using single-backend fallback for legacy volume ID %q", volumeID)
+		backendID = controller.sortedBackendIDs()[0]
+	}
+	return backendID, nil
 }
 
 // New is a convenience fn for creating a controller driver
@@ -86,18 +145,46 @@ func New() *Controller {
 		client:             client,
 		runPath:            fmt.Sprintf("/var/run/%s", common.PluginName),
 		nodeServiceClients: map[string]*grpc.ClientConn{},
+		knownInitiators:    map[string]struct{}{},
 	}
-	controller.backendConfigs, controller.backendConfigErr = loadBackendConfigsFromFile(os.Getenv(common.ControllerBackendConfigFileEnvVar))
-	controller.configureClientFn = controller.configureClient
-	controller.showSnapshotsFn = controller.client.ShowSnapshots
-	controller.createSnapshotFn = controller.client.CreateSnapshot
-	controller.deleteSnapshotFn = controller.client.DeleteSnapshot
+	backendConfigPath := os.Getenv(common.ControllerBackendConfigFileEnvVar)
+	controller.backendConfigs, controller.backendConfigErr = loadBackendConfigsFromFile(backendConfigPath)
 	if controller.backendConfigErr != nil {
-		klog.ErrorS(controller.backendConfigErr, "failed to load controller backend credentials")
-	} else if len(controller.backendConfigs) > 0 {
-		klog.InfoS("loaded controller backend credentials", "backendCount", len(controller.backendConfigs))
+		klog.Errorf("failed to load backend configs from %s: %v", backendConfigPath, controller.backendConfigErr)
+	} else {
+		klog.Infof("loaded %d backend configs", len(controller.backendConfigs))
 	}
-
+	controller.configureClientFn = controller.configureClient
+	controller.showSnapshotsFn = func(apiClient *storageapi.Client, snapshotID, sourceVolumeID string) ([]storageapitypes.SnapshotObject, error) {
+		response, respStatus, err := apiClient.ShowSnapshots(snapshotID, sourceVolumeID)
+		if err != nil {
+			if respStatus != nil && respStatus.ReturnCode == storageapitypes.BadInputParam {
+				return []storageapitypes.SnapshotObject{}, nil
+			}
+			return nil, err
+		}
+		return response, nil
+	}
+	controller.createSnapshotFn = func(apiClient *storageapi.Client, sourceVolumeID, snapshotName string) error {
+		respStatus, err := apiClient.CreateSnapshot(sourceVolumeID, snapshotName)
+		if err != nil {
+			if respStatus != nil && respStatus.ReturnCode == storageapitypes.SnapshotAlreadyExists {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	controller.deleteSnapshotFn = func(apiClient *storageapi.Client, snapshotID string) error {
+		respStatus, err := apiClient.DeleteSnapshot(snapshotID)
+		if err != nil {
+			if respStatus != nil && respStatus.ReturnCode == storageapitypes.SnapshotNotFoundErrorCode {
+				return preserveStatusOr(codes.NotFound, err)
+			}
+			return err
+		}
+		return nil
+	}
 	if err := os.MkdirAll(controller.runPath, 0755); err != nil {
 		panic(err)
 	}
@@ -115,10 +202,6 @@ func New() *Controller {
 		}),
 		func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 			driverContext := DriverCtx{}
-			reqWithSecrets, ok := req.(common.WithSecrets)
-			if ok {
-				driverContext.Credentials = reqWithSecrets.GetSecrets()
-			}
 			if reqWithParameters, ok := req.(common.WithParameters); ok {
 				driverContext.Parameters = reqWithParameters.GetParameters()
 			}
@@ -192,7 +275,15 @@ func (controller *Controller) ValidateVolumeCapabilities(ctx context.Context, re
 	if err := validateAccessModes(req.GetVolumeCapabilities()); err != nil {
 		return nil, err
 	}
-	_, _, err := controller.client.ShowVolumes(volumeName)
+	backendID, err := controller.resolveBackendIDForVolumeID(req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	apiClient, err := controller.getConfiguredClient(ctx, backendID)
+	if err != nil {
+		return nil, err
+	}
+	_, _, err = apiClient.ShowVolumes(volumeName)
 	if err != nil {
 		return nil, status.Error(codes.NotFound, "cannot validate volume not found")
 	}
@@ -241,18 +332,18 @@ func (controller *Controller) beginRoutine(ctx *DriverCtx, methodName string) er
 		return nil
 	}
 
-	if ctx.Credentials == nil {
-		return errors.New("missing API credentials")
+	if controller.backendConfigErr != nil {
+		return status.Errorf(codes.FailedPrecondition, "controller backend credentials are required; ensure CONTROLLER_BACKEND_CONFIG_FILE is set: %v", controller.backendConfigErr)
 	}
 
-	return controller.configureClientFn(ctx.Credentials)
+	return nil
 }
 
 func (controller *Controller) endRoutine() {
 	controller.client.HTTPClient.CloseIdleConnections()
 }
 
-func (controller *Controller) configureClient(credentials map[string]string) error {
+func (controller *Controller) configureClient(apiClient *storageapi.Client, credentials map[string]string) error {
 	username := string(credentials[common.UsernameSecretKey])
 	password := string(credentials[common.PasswordSecretKey])
 	apiAddr := string(credentials[common.APIAddressConfigKey])
@@ -275,21 +366,29 @@ func (controller *Controller) configureClient(credentials map[string]string) err
 	if secondaryapiAddr != "" {
 		apiAddresses = append(apiAddresses, secondaryapiAddr)
 	}
-	controller.client.StoreCredentials(apiAddresses, "", username, password)
+	apiClient.StoreCredentials(apiAddresses, "", username, password)
 
-	ctx := context.WithValue(context.Background(), client.ContextBasicAuth, client.BasicAuth{
+	requestCtx := apiClient.Ctx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	ctx := context.WithValue(requestCtx, client.ContextBasicAuth, client.BasicAuth{
 		UserName: username,
 		Password: password,
 	})
-	err := controller.client.Login(ctx)
+	err := apiClient.Login(ctx)
 	if err != nil {
-		return status.Error(codes.Unauthenticated, err.Error())
+		return preserveStatusOr(codes.Unauthenticated, err)
 	}
 
 	klog.Info("login was successful")
-	err = controller.client.InitSystemInfo()
+	if apiClient.Info == nil {
+		if err := apiClient.InitSystemInfo(); err != nil {
+			return err
+		}
+	}
 
-	return err
+	return nil
 }
 
 func validateAccessModes(capabilities []*csi.VolumeCapability) error {
@@ -325,10 +424,6 @@ func runPreflightChecks(parameters map[string]string, capabilities *[]*csi.Volum
 			return status.Errorf(codes.InvalidArgument, "'%s' is missing from configuration", key)
 		}
 		return nil
-	}
-
-	if err := checkIfKeyExistsInConfig(common.PoolConfigKey); err != nil {
-		return err
 	}
 
 	if capabilities != nil {

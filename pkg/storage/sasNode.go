@@ -126,8 +126,12 @@ func (sas *sasStorage) AttachStorage(ctx context.Context, req *csi.NodePublishVo
 
 	klog.InfoS("initiating SAS connection...")
 	wwn, _ := common.VolumeIdGetWwn(req.GetVolumeId())
-	connector := saslib.Connector{VolumeWWN: wwn}
-	path, err := saslib.Attach(ctx, &connector, &saslib.OSioHandler{})
+	volumeName, _ := common.VolumeIdGetName(req.GetVolumeId())
+	var connector *saslib.Connector
+	path, err := attachWithDiscoveryRetry(ctx, volumeName, wwn, func() (string, error) {
+		connector = &saslib.Connector{VolumeWWN: wwn}
+		return saslib.Attach(ctx, connector, &saslib.OSioHandler{})
+	})
 	if err != nil {
 		return path, status.Error(codes.Unavailable, err.Error())
 	}
