@@ -41,6 +41,11 @@ const (
 	FCAddressFilePath  = "/etc/kubernetes/fc-addresses"
 )
 
+var (
+	attachDiscoveryTimeout       = 90 * time.Second
+	attachDiscoveryRetryInterval = 3 * time.Second
+)
+
 type StorageOperations interface {
 	csi.NodeServer
 	AttachStorage(ctx context.Context, req *csi.NodePublishVolumeRequest) (string, error)
@@ -167,6 +172,53 @@ func CheckPreviouslyRemovedDevices(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func isTransientDiscoveryFailure(path string, err error) bool {
+	if err == nil {
+		return strings.TrimSpace(path) == ""
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "no sas disk found")
+}
+
+func waitForDiscoveryRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func attachWithDiscoveryRetry(ctx context.Context, volumeName, expectedWWN string, attach func() (string, error)) (string, error) {
+	start := time.Now()
+	attempt := 1
+
+	for {
+		path, err := attach()
+		if !isTransientDiscoveryFailure(path, err) {
+			return path, err
+		}
+		if time.Since(start) >= attachDiscoveryTimeout {
+			return "", fmt.Errorf("no SAS disk found")
+		}
+
+		klog.V(1).InfoS("waiting for FC/SAS device discovery",
+			"volumeName", volumeName,
+			"expectedWWN", expectedWWN,
+			"attempt", attempt,
+			"elapsed", time.Since(start).String(),
+		)
+
+		if err := waitForDiscoveryRetry(ctx, attachDiscoveryRetryInterval); err != nil {
+			return "", err
+		}
+		attempt++
+	}
 }
 
 // FindDeviceFormat:
