@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	storageapi "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/api"
 	storageapitypes "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/common"
@@ -273,17 +274,19 @@ func (driver *Controller) isVolumeMappedToInitiator(apiClient *storageapi.Client
 	if err != nil {
 		return false, -1, err
 	}
+	trimmedVolumeName := strings.TrimSpace(volumeName)
 	for _, volume := range volumes {
-		if volume.Name == "" {
+		name := strings.TrimSpace(volume.Name)
+		if name == "" {
 			continue
 		}
-		if volume.Name != volumeName {
+		if name != trimmedVolumeName {
 			continue
 		}
 		klog.InfoS("volume already mapped to initiator, skipping map",
 			"volumeName", volumeName,
 			"initiator", initiator,
-			"matchedVolumeName", volume.Name,
+			"matchedVolumeName", name,
 			"lun", volume.LUN,
 		)
 		return true, volume.LUN, nil
