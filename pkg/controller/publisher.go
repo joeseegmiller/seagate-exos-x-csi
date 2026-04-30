@@ -274,10 +274,19 @@ func (driver *Controller) isVolumeMappedToInitiator(apiClient *storageapi.Client
 		return false, -1, err
 	}
 	for _, volume := range volumes {
-		if volume.Name == volumeName {
-			klog.Infof("volume already mapped to this initiator at lun %d", volume.LUN)
-			return true, volume.LUN, nil
+		if volume.Name == "" {
+			continue
 		}
+		if volume.Name != volumeName {
+			continue
+		}
+		klog.InfoS("volume already mapped to initiator, skipping map",
+			"volumeName", volumeName,
+			"initiator", initiator,
+			"matchedVolumeName", volume.Name,
+			"lun", volume.LUN,
+		)
+		return true, volume.LUN, nil
 	}
 	klog.V(1).InfoS("volume not mapped to this initiator, will map", "volumeName", volumeName, "initiator", initiator, "candidateLUN", lun)
 	return false, -1, nil
