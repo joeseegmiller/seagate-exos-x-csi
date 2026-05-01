@@ -275,15 +275,27 @@ func (driver *Controller) logHostMapsForInitiator(apiClient *storageapi.Client, 
 }
 
 func mappedLUNFromResponse(response string) (int, bool) {
-    fields := strings.FieldsFunc(response, func(r rune) bool {
-        return r < '0' || r > '9'
-    })
-    for _, field := range fields {
-        lun, err := strconv.Atoi(field)
-        if err == nil {
-            return lun, true
+    lower := strings.ToLower(response)
+    idx := strings.Index(lower, "lun")
+    if idx == -1 {
+        return 0, false
+    }
+
+    // scan after "lun"
+    for i := idx; i < len(response); i++ {
+        if response[i] >= '0' && response[i] <= '9' {
+            j := i
+            for j < len(response) && response[j] >= '0' && response[j] <= '9' {
+                j++
+            }
+            lun, err := strconv.Atoi(response[i:j])
+            if err == nil {
+                return lun, true
+            }
+            break
         }
     }
+
     return 0, false
 }
 
