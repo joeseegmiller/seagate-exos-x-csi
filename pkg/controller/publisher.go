@@ -196,12 +196,8 @@ func (driver *Controller) publishVolumeWithRetry(apiClient *storageapi.Client, v
 
 func (driver *Controller) mapVolumeToInitiators(apiClient *storageapi.Client, volumeName string, initiators []string, lun int) (int, error) {
 	newlyMappedInitiators := make([]string, 0, len(initiators))
-	actualLUN := -1
 	for _, initiator := range initiators {
 		targetLUN := lun
-		if actualLUN != -1 {
-			targetLUN = actualLUN
-		}
 
 		klog.InfoS("ensuring mapping for initiator", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN)
 		respStatus, err := apiClient.MapVolume(volumeName, initiator, "rw", targetLUN)
@@ -237,55 +233,31 @@ func (driver *Controller) mapVolumeToInitiators(apiClient *storageapi.Client, vo
 		}
 		authoritativeLUN, hasAuthoritativeLUN := mappedLUNFromResponse(responseText)
 		if alreadyMapped {
-			lunForCheck := targetLUN
 			if hasAuthoritativeLUN {
-				lunForCheck = authoritativeLUN
-				klog.InfoS("using backend-confirmed LUN", "volumeName", volumeName, "initiator", initiator, "lun", lunForCheck)
-			} else if actualLUN == -1 {
-				klog.InfoS("using fallback LUN", "volumeName", volumeName, "initiator", initiator, "lun", lunForCheck)
+				klog.InfoS("using backend-confirmed LUN", "volumeName", volumeName, "initiator", initiator, "lun", authoritativeLUN)
+			} else {
+				klog.InfoS("using fallback LUN", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN)
 			}
-			if actualLUN == -1 {
-				actualLUN = lunForCheck
-			} else if hasAuthoritativeLUN && actualLUN != lunForCheck {
-				driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
-				return -1, status.Errorf(
-					codes.FailedPrecondition,
-					"inconsistent LUN mapping for volume %s: found %d and %d",
-					volumeName, actualLUN, lunForCheck,
-				)
-			}
-			klog.InfoS("mapping treated as success", "volumeName", volumeName, "initiator", initiator, "lun", lunForCheck, "returnCode", responseReturnCode(respStatus), "response", respStatus.Response)
+			klog.InfoS("mapping treated as success", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN, "returnCode", responseReturnCode(respStatus), "response", respStatus.Response)
 			continue
 		}
 
-		lunForCheck := targetLUN
 		if hasAuthoritativeLUN {
-			lunForCheck = authoritativeLUN
-			klog.InfoS("using backend-confirmed LUN", "volumeName", volumeName, "initiator", initiator, "lun", lunForCheck)
-		} else if actualLUN == -1 {
-			klog.InfoS("using fallback LUN", "volumeName", volumeName, "initiator", initiator, "lun", lunForCheck)
-		}
-		if actualLUN == -1 {
-			actualLUN = lunForCheck
-		} else if hasAuthoritativeLUN && actualLUN != lunForCheck {
-			driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
-			return -1, status.Errorf(
-				codes.FailedPrecondition,
-				"inconsistent LUN mapping for volume %s: found %d and %d",
-				volumeName, actualLUN, lunForCheck,
-			)
+			klog.InfoS("using backend-confirmed LUN", "volumeName", volumeName, "initiator", initiator, "lun", authoritativeLUN)
+		} else {
+			klog.InfoS("using fallback LUN", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN)
 		}
 		if respStatus != nil && respStatus.ReturnCode == 0 {
-			klog.InfoS("mapping treated as success", "volumeName", volumeName, "initiator", initiator, "lun", lunForCheck, "returnCode", responseReturnCode(respStatus), "response", respStatus.Response)
+			klog.InfoS("mapping treated as success", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN, "returnCode", responseReturnCode(respStatus), "response", respStatus.Response)
 		}
 	}
 
-	if actualLUN == -1 {
+	if len(newlyMappedInitiators) == 0 {
 		return -1, status.Error(codes.Internal, "no LUN assigned after mapping")
 	}
 
-	klog.InfoS("successfully mapped volume to all initiators", "volumeName", volumeName, "initiators", initiators, "lun", actualLUN)
-	return actualLUN, nil
+	klog.InfoS("successfully mapped volume to all initiators", "volumeName", volumeName, "initiators", initiators, "lun", lun)
+	return lun, nil
 }
 
 func (driver *Controller) logHostMapsForInitiator(apiClient *storageapi.Client, volumeName, initiator string) {
@@ -309,7 +281,7 @@ func mappedLUNFromResponse(response string) (int, bool) {
 	for _, field := range fields {
 		lun, err := strconv.Atoi(field)
 		if err == nil {
-			return lun, true
+			return 0, nil
 		}
 	}
 	return 0, false
