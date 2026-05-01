@@ -540,7 +540,7 @@ func TestAttachWithDiscoveryRetryRetriesTransientNoSASDiskFound(t *testing.T) {
 			return "", errors.New("no SAS disk found")
 		}
 		return "/dev/dm-1", nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("attachWithDiscoveryRetry returned error: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestAttachWithDiscoveryRetryDoesNotRetryUnexpectedErrors(t *testing.T) {
 	_, err := attachWithDiscoveryRetry(context.Background(), "vol-a", "wwn-123", func() (string, error) {
 		attempts++
 		return "", errors.New("invalid WWN")
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -583,7 +583,7 @@ func TestAttachWithDiscoveryRetryRetriesEmptyPath(t *testing.T) {
 			return "", nil
 		}
 		return "/dev/dm-2", nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("attachWithDiscoveryRetry returned error: %v", err)
 	}
@@ -592,5 +592,41 @@ func TestAttachWithDiscoveryRetryRetriesEmptyPath(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestAttachWithDiscoveryRetryRetriesValidationFailure(t *testing.T) {
+	originalTimeout := attachDiscoveryTimeout
+	originalInterval := attachDiscoveryRetryInterval
+	attachDiscoveryTimeout = 50 * time.Millisecond
+	attachDiscoveryRetryInterval = time.Millisecond
+	defer func() {
+		attachDiscoveryTimeout = originalTimeout
+		attachDiscoveryRetryInterval = originalInterval
+	}()
+
+	attachAttempts := 0
+	validateAttempts := 0
+	path, err := attachWithDiscoveryRetry(context.Background(), "vol-a", "wwn-123", func() (string, error) {
+		attachAttempts++
+		return "/dev/dm-4", nil
+	}, func(path string) error {
+		validateAttempts++
+		if validateAttempts < 3 {
+			return fmt.Errorf("attached device WWN mismatch for volume vol-a: expected wwn-123, got wrong-wwn for %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("attachWithDiscoveryRetry returned error: %v", err)
+	}
+	if path != "/dev/dm-4" {
+		t.Fatalf("path = %q, want /dev/dm-4", path)
+	}
+	if attachAttempts != 3 {
+		t.Fatalf("attachAttempts = %d, want 3", attachAttempts)
+	}
+	if validateAttempts != 3 {
+		t.Fatalf("validateAttempts = %d, want 3", validateAttempts)
 	}
 }

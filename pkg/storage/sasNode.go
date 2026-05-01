@@ -131,11 +131,14 @@ func (sas *sasStorage) AttachStorage(ctx context.Context, req *csi.NodePublishVo
 	path, err := attachWithDiscoveryRetry(ctx, volumeName, wwn, func() (string, error) {
 		connector = &saslib.Connector{VolumeWWN: wwn}
 		return saslib.Attach(ctx, connector, &saslib.OSioHandler{})
+	}, func(path string) error {
+		return ValidateAttachedDeviceWWN(volumeName, path, wwn)
 	})
 	if err != nil {
 		return path, status.Error(codes.Unavailable, err.Error())
 	}
-	klog.InfoS("attached device", "path", path)
+	connector.OSPathName = path
+	klog.InfoS("attached device", "volumeName", volumeName, "path", path, "expectedWWN", wwn)
 	err = connector.Persist(ctx, sas.connectorInfoPath)
 	return path, err
 }

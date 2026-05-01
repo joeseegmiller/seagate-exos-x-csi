@@ -219,54 +219,7 @@ func (driver *Controller) mapVolumeToInitiators(apiClient *storageapi.Client, vo
 			alreadyMapped := respStatus != nil &&
 				respStatus.ReturnCode == storageapitypes.LUNOverlapErrorCode &&
 				strings.Contains(strings.ToLower(respStatus.Response), "already mapped")
-			if alreadyMapped {
-				mapped, verifiedLUN, verifyErr := driver.verifyVolumeMappedToInitiator(apiClient, volumeName, initiator)
-				if verifyErr != nil {
-					driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
-					return -1, verifyErr
-				}
-				if mapped {
-					klog.InfoS("mapping treated as success", "volumeName", volumeName, "initiator", initiator, "lun", verifiedLUN, "returnCode", responseReturnCode(respStatus), "response", respStatus.Response)
-					if actualLUN == -1 {
-						actualLUN = verifiedLUN
-					} else if actualLUN != verifiedLUN {
-						driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
-						return -1, status.Errorf(
-							codes.FailedPrecondition,
-							"inconsistent LUN mapping for volume %s: found %d and %d",
-							volumeName, actualLUN, verifiedLUN,
-						)
-					}
-					break
-				}
-				if time.Since(start) >= 60*time.Second {
-					driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
-					return -1, status.Errorf(codes.AlreadyExists, "mapping failed: returnCode=%d response=%s", respStatus.ReturnCode, respStatus.Response)
-				}
-				klog.InfoS("already mapped but not yet visible, retrying",
-					"volumeName", volumeName,
-					"initiator", initiator,
-					"elapsed", time.Since(start).String(),
-				)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-
-			if respStatus != nil && respStatus.ReturnCode == 0 {
-				newlyMappedInitiators = append(newlyMappedInitiators, initiator)
-				if actualLUN == -1 {
-					actualLUN = targetLUN
-				} else if actualLUN != targetLUN {
-					driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
-					return -1, status.Errorf(
-						codes.FailedPrecondition,
-						"inconsistent LUN mapping for volume %s: found %d and %d",
-						volumeName, actualLUN, targetLUN,
-					)
-				}
-				break
-			}
-			if respStatus != nil && respStatus.ReturnCode == storageapitypes.LUNOverlapErrorCode {
+			if respStatus != nil && respStatus.ReturnCode == storageapitypes.LUNOverlapErrorCode && !alreadyMapped {
 				driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
 				return -1, status.Errorf(codes.AlreadyExists, "mapping failed: returnCode=%d response=%s", respStatus.ReturnCode, respStatus.Response)
 			}
@@ -278,6 +231,52 @@ func (driver *Controller) mapVolumeToInitiators(apiClient *storageapi.Client, vo
 				driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
 				return -1, status.Errorf(codes.Internal, "mapping failed: returnCode=%d response=%s", respStatus.ReturnCode, respStatus.Response)
 			}
+
+			mapped, verifiedLUN, verifyErr := driver.verifyVolumeMappedToInitiator(apiClient, volumeName, initiator)
+			if verifyErr != nil {
+				driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
+				return -1, verifyErr
+			}
+			if mapped {
+				if !containsString(newlyMappedInitiators, initiator) {
+					newlyMappedInitiators = append(newlyMappedInitiators, initiator)
+				}
+				if actualLUN == -1 {
+					actualLUN = verifiedLUN
+				} else if actualLUN != verifiedLUN {
+					driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
+					return -1, status.Errorf(
+						codes.FailedPrecondition,
+						"inconsistent LUN mapping for volume %s: found %d and %d",
+						volumeName, actualLUN, verifiedLUN,
+					)
+				}
+				if alreadyMapped {
+					klog.InfoS("mapping treated as success", "volumeName", volumeName, "initiator", initiator, "lun", verifiedLUN, "returnCode", responseReturnCode(respStatus), "response", respStatus.Response)
+				}
+				break
+			}
+
+			if time.Since(start) >= 60*time.Second {
+				driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
+				if alreadyMapped {
+					return -1, status.Errorf(codes.AlreadyExists, "mapping failed: returnCode=%d response=%s", respStatus.ReturnCode, respStatus.Response)
+				}
+				if respStatus != nil {
+					return -1, status.Errorf(codes.Internal, "failed to ensure mapping after retries: returnCode=%d response=%s", respStatus.ReturnCode, respStatus.Response)
+				}
+				if err == nil {
+					return -1, status.Error(codes.Internal, "failed to ensure mapping after retries: mapping not present after MapVolume")
+				}
+				return -1, preserveStatusOr(codes.Internal, err)
+			}
+
+			klog.InfoS("mapping not yet visible, retrying",
+				"volumeName", volumeName,
+				"initiator", initiator,
+				"elapsed", time.Since(start).String(),
+			)
+			time.Sleep(2 * time.Second)
 		}
 	}
 
@@ -313,6 +312,15 @@ func mappedLUNFromResponse(response string) (int, bool) {
 		return 0, false
 	}
 	return lun, true
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (driver *Controller) cleanupMappedInitiators(apiClient *storageapi.Client, volumeName string, initiators []string) {

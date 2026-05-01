@@ -268,6 +268,10 @@ func isTransientDiscoveryFailure(path string, err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "no sas disk found")
 }
 
+func isTransientValidationFailure(err error) bool {
+	return err != nil
+}
+
 func waitForDiscoveryRetry(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
@@ -280,16 +284,32 @@ func waitForDiscoveryRetry(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func attachWithDiscoveryRetry(ctx context.Context, volumeName, expectedWWN string, attach func() (string, error)) (string, error) {
+func attachWithDiscoveryRetry(ctx context.Context, volumeName, expectedWWN string, attach func() (string, error), validate func(string) error) (string, error) {
 	start := time.Now()
 	attempt := 1
+	var lastErr error
 
 	for {
 		path, err := attach()
-		if !isTransientDiscoveryFailure(path, err) {
+		if isTransientDiscoveryFailure(path, err) {
+			lastErr = err
+		} else if err == nil && strings.TrimSpace(path) != "" && validate != nil {
+			if validationErr := validate(path); validationErr == nil {
+				return path, nil
+			} else if isTransientValidationFailure(validationErr) {
+				lastErr = validationErr
+				err = validationErr
+			} else {
+				return path, validationErr
+			}
+		} else {
 			return path, err
 		}
+
 		if time.Since(start) >= attachDiscoveryTimeout {
+			if lastErr != nil {
+				return "", lastErr
+			}
 			return "", fmt.Errorf("no SAS disk found")
 		}
 
@@ -298,6 +318,7 @@ func attachWithDiscoveryRetry(ctx context.Context, volumeName, expectedWWN strin
 			"expectedWWN", expectedWWN,
 			"attempt", attempt,
 			"elapsed", time.Since(start).String(),
+			"reason", errorString(err),
 		)
 
 		if err := waitForDiscoveryRetry(ctx, attachDiscoveryRetryInterval); err != nil {
@@ -305,6 +326,13 @@ func attachWithDiscoveryRetry(ctx context.Context, volumeName, expectedWWN strin
 		}
 		attempt++
 	}
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // FindDeviceFormat:
