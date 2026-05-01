@@ -168,7 +168,7 @@ func (driver *Controller) publishVolumeWithRetry(apiClient *storageapi.Client, v
 	if err != nil {
 		return "", err
 	}
-	klog.Infof("selected candidate LUN %d for volume %s", candidateLUN, volumeName)
+	klog.V(1).InfoS("selected candidate LUN", "volumeName", volumeName, "lun", candidateLUN)
 
 	maxRetryLUN := candidateLUN + 9
 	if maxRetryLUN >= storageapi.ApiMaximumLUN {
@@ -177,13 +177,13 @@ func (driver *Controller) publishVolumeWithRetry(apiClient *storageapi.Client, v
 
 	for lun := candidateLUN; lun <= maxRetryLUN; lun++ {
 		if lun != candidateLUN {
-			klog.Infof("retrying mapping with LUN %d", lun)
+			klog.V(1).InfoS("retrying mapping with LUN", "volumeName", volumeName, "lun", lun)
 		}
 		klog.V(1).InfoS("attempting volume mapping", "volumeName", volumeName, "initiators", initiators, "lun", lun)
 		actualLUN, err := driver.mapVolumeToInitiators(apiClient, volumeName, initiators, lun)
 		if err != nil {
 			if isLUNAllocationFailure(err) {
-				klog.ErrorS(err, "mapping failed due to LUN conflict, retrying", "volumeName", volumeName, "lun", lun)
+				klog.V(1).ErrorS("mapping failed due to LUN conflict, retrying", "volumeName", volumeName, "lun", lun, "err", err)
 				continue
 			}
 			return "", err
@@ -199,7 +199,7 @@ func (driver *Controller) mapVolumeToInitiators(apiClient *storageapi.Client, vo
 	for _, initiator := range initiators {
 		targetLUN := lun
 
-		klog.InfoS("ensuring mapping for initiator", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN)
+		klog.V(1).InfoS("ensuring mapping for initiator", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN)
 		respStatus, err := apiClient.MapVolume(volumeName, initiator, "rw", targetLUN)
 		driver.logHostMapsForInitiator(apiClient, volumeName, initiator)
 
@@ -234,21 +234,21 @@ func (driver *Controller) mapVolumeToInitiators(apiClient *storageapi.Client, vo
 		authoritativeLUN, hasAuthoritativeLUN := mappedLUNFromResponse(responseText)
 		if alreadyMapped {
 			if hasAuthoritativeLUN {
-				klog.InfoS("using backend-confirmed LUN", "volumeName", volumeName, "initiator", initiator, "lun", authoritativeLUN)
+				klog.V(1).InfoS("using backend-confirmed LUN", "volumeName", volumeName, "initiator", initiator, "lun", authoritativeLUN)
 			} else {
-				klog.InfoS("using fallback LUN", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN)
+				klog.V(1).InfoS("using fallback LUN", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN)
 			}
-			klog.InfoS("mapping treated as success", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN, "returnCode", responseReturnCode(respStatus), "response", respStatus.Response)
+			klog.V(1).InfoS("mapping treated as success", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN, "returnCode", responseReturnCode(respStatus), "response", respStatus.Response)
 			continue
 		}
 
 		if hasAuthoritativeLUN {
-			klog.InfoS("using backend-confirmed LUN", "volumeName", volumeName, "initiator", initiator, "lun", authoritativeLUN)
+			klog.V(1).InfoS("using backend-confirmed LUN", "volumeName", volumeName, "initiator", initiator, "lun", authoritativeLUN)
 		} else {
-			klog.InfoS("using fallback LUN", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN)
+			klog.V(1).InfoS("using fallback LUN", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN)
 		}
 		if respStatus != nil && respStatus.ReturnCode == 0 {
-			klog.InfoS("mapping treated as success", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN, "returnCode", responseReturnCode(respStatus), "response", respStatus.Response)
+			klog.V(1).InfoS("mapping treated as success", "volumeName", volumeName, "initiator", initiator, "lun", targetLUN, "returnCode", responseReturnCode(respStatus), "response", respStatus.Response)
 		}
 	}
 
@@ -271,7 +271,7 @@ func (driver *Controller) logHostMapsForInitiator(apiClient *storageapi.Client, 
 	for _, volume := range volumes {
 		summaries = append(summaries, fmt.Sprintf("name=%q lun=%d", strings.TrimSpace(volume.Name), volume.LUN))
 	}
-	klog.V(1).InfoS("ShowHostMaps informational result only", "volumeName", volumeName, "initiator", initiator, "hostMaps", summaries)
+	klog.V(2).InfoS("ShowHostMaps informational result only", "volumeName", volumeName, "initiator", initiator, "hostMaps", summaries)
 }
 
 func mappedLUNFromResponse(response string) (int, bool) {

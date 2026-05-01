@@ -250,7 +250,7 @@ func ValidateAttachedDeviceWWN(volumeName, devicePath, expectedWWN string) error
 	}
 
 	expectedWWN = normalizeWWN(expectedWWN)
-	klog.Infof("Attached device validation: volumeName=%s devicePath=%s resolvedWWN=%s expectedWWN=%s", volumeName, devicePath, resolvedWWN, expectedWWN)
+	klog.V(1).Infof("Attached device validation: volumeName=%s devicePath=%s resolvedWWN=%s expectedWWN=%s", volumeName, devicePath, resolvedWWN, expectedWWN)
 	if resolvedWWN != expectedWWN {
 		err := fmt.Errorf("attached device WWN mismatch for volume %s: expected %s, got %s for %s", volumeName, expectedWWN, resolvedWWN, devicePath)
 		klog.Errorf("%v", err)
@@ -416,7 +416,7 @@ func runLoggedCommand(name string, args ...string) ([]byte, error) {
 	klog.Infof("Running command: %s %s", name, strings.Join(args, " "))
 	output, err := execCommand(name, args...).CombinedOutput()
 	exitCode := exitCodeFromError(err)
-	klog.Infof("Command output: %s", string(output))
+	klog.V(2).Infof("Command output: %s", string(output))
 	klog.Infof("Command exit code: %d", exitCode)
 	if err != nil {
 		klog.Errorf("Command failed: %s %s", name, strings.Join(args, " "))
@@ -459,7 +459,7 @@ func ResizeFilesystem(devicePath, volumePath string) error {
 		klog.Errorf("Failed to collect filesystem state after resize for mount path %s: %v", volumePath, err)
 		return fmt.Errorf("failed to collect filesystem state after resize for %s: %w", volumePath, err)
 	}
-	klog.Infof("Filesystem after resize: %s", string(dfAfter))
+	klog.V(2).Infof("Filesystem after resize: %s", string(dfAfter))
 
 	return nil
 }
@@ -484,7 +484,7 @@ func mountTarget(fsType, devicePath, targetPath string) error {
 	// XFS preserves filesystem UUIDs across clones and snapshots. Linux refuses
 	// to mount multiple XFS filesystems with the same UUID on the same node, so
 	// retry with nouuid to allow cloned volumes to mount together.
-	klog.Infof("xfs mount failed for %s, retrying with nouuid", devicePath)
+	klog.V(1).Infof("xfs mount failed for %s, retrying with nouuid", devicePath)
 	retryArgs := []string{"-t", fsType, "-o", "nouuid", devicePath, targetPath}
 	klog.V(4).Infof("Running mount command: mount %s", strings.Join(retryArgs, " "))
 	retryOut, retryErr := execCommand("mount", retryArgs...).CombinedOutput()
