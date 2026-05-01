@@ -183,7 +183,7 @@ func (driver *Controller) publishVolumeWithRetry(apiClient *storageapi.Client, v
 		actualLUN, err := driver.mapVolumeToInitiators(apiClient, volumeName, initiators, lun)
 		if err != nil {
 			if isLUNAllocationFailure(err) {
-				klog.V(1).ErrorS("mapping failed due to LUN conflict, retrying", "volumeName", volumeName, "lun", lun, "err", err)
+				klog.V(1).ErrorS(err, "mapping failed due to LUN conflict, retrying", "volumeName", volumeName, "lun", lun )
 				continue
 			}
 			return "", err
