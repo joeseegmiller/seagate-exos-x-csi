@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	storageapi "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/api"
 	storageapitypes "github.com/Seagate/seagate-exos-x-api-go/v2/pkg/common"
@@ -19,13 +20,25 @@ import (
 
 // ControllerPublishVolume attaches the given volume to the node
 func (driver *Controller) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
+	start := time.Now()
+	result := "success"
+	defer func() {
+		publishDuration.WithLabelValues(result).Observe(time.Since(start).Seconds())
+	}()
+
 	if len(req.GetVolumeId()) == 0 {
+		publishErrors.Inc()
+		result = "error"
 		return nil, status.Error(codes.InvalidArgument, "cannot publish volume with empty ID")
 	}
 	if len(req.GetNodeId()) == 0 {
+		publishErrors.Inc()
+		result = "error"
 		return nil, status.Error(codes.InvalidArgument, "cannot publish volume to a node with empty ID")
 	}
 	if req.GetVolumeCapability() == nil {
+		publishErrors.Inc()
+		result = "error"
 		return nil, status.Error(codes.InvalidArgument, "cannot publish volume without capabilities")
 	}
 
@@ -35,6 +48,8 @@ func (driver *Controller) ControllerPublishVolume(ctx context.Context, req *csi.
 	initiators, err := driver.GetNodeInitiators(ctx, nodeIP, parameters[common.StorageProtocolKey])
 	if err != nil {
 		klog.ErrorS(err, "error getting node initiators", "node-ip", nodeIP, "storage-protocol", parameters[common.StorageProtocolKey])
+		publishErrors.Inc()
+		result = "error"
 		return nil, status.Error(codes.NotFound, fmt.Sprintf("Could not retrieve initiators for scheduled node(%s)", nodeIP))
 	}
 
@@ -61,15 +76,21 @@ func (driver *Controller) ControllerPublishVolume(ctx context.Context, req *csi.
 	driver.recordKnownInitiators(initiators)
 	backendID, err := driver.resolveBackendIDForVolumeID(req.GetVolumeId())
 	if err != nil {
+		publishErrors.Inc()
+		result = "error"
 		return nil, err
 	}
 	apiClient, err := driver.getConfiguredClient(ctx, backendID)
 	if err != nil {
+		publishErrors.Inc()
+		result = "error"
 		return nil, err
 	}
 
 	lun, err := driver.publishVolumeWithRetry(apiClient, volumeName, initiators)
 	if err != nil {
+		publishErrors.Inc()
+		result = "error"
 		return nil, err
 	}
 
@@ -80,7 +101,10 @@ func (driver *Controller) ControllerPublishVolume(ctx context.Context, req *csi.
 
 // ControllerUnpublishVolume detaches the given volume from the node
 func (driver *Controller) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
+	unpublishTotal.Inc()
+
 	if len(req.GetVolumeId()) == 0 {
+		unpublishErrors.Inc()
 		return nil, status.Error(codes.InvalidArgument, "cannot unpublish volume with empty ID")
 	}
 
@@ -102,6 +126,7 @@ func (driver *Controller) ControllerUnpublishVolume(ctx context.Context, req *cs
 	storageProtocol, err := common.VolumeIdGetStorageProtocol(req.GetVolumeId())
 	if err != nil {
 		klog.ErrorS(err, "No storage protocol found in ControllerUnpublishVolume", "storage protocol", storageProtocol, "volume ID:", req.GetVolumeId())
+		unpublishErrors.Inc()
 		return nil, err
 	}
 
@@ -112,10 +137,12 @@ func (driver *Controller) ControllerUnpublishVolume(ctx context.Context, req *cs
 	driver.recordKnownInitiators(initiators)
 	backendID, err := driver.resolveBackendIDForVolumeID(req.GetVolumeId())
 	if err != nil {
+		unpublishErrors.Inc()
 		return nil, err
 	}
 	apiClient, err := driver.getConfiguredClient(ctx, backendID)
 	if err != nil {
+		unpublishErrors.Inc()
 		return nil, err
 	}
 
@@ -177,6 +204,7 @@ func (driver *Controller) publishVolumeWithRetry(apiClient *storageapi.Client, v
 
 	for lun := candidateLUN; lun <= maxRetryLUN; lun++ {
 		if lun != candidateLUN {
+			publishLUNRetries.Inc()
 			klog.V(1).InfoS("retrying mapping with LUN", "volumeName", volumeName, "lun", lun)
 		}
 		klog.V(1).InfoS("attempting volume mapping", "volumeName", volumeName, "initiators", initiators, "lun", lun)
@@ -211,6 +239,9 @@ func (driver *Controller) mapVolumeToInitiators(apiClient *storageapi.Client, vo
 		alreadyMapped := respStatus != nil &&
 			respStatus.ReturnCode == storageapitypes.LUNOverlapErrorCode &&
 			strings.Contains(strings.ToLower(respStatus.Response), "already mapped")
+		if alreadyMapped {
+			publishAlreadyMapped.Inc()
+		}
 		if respStatus != nil && respStatus.ReturnCode == storageapitypes.LUNOverlapErrorCode && !alreadyMapped {
 			driver.cleanupMappedInitiators(apiClient, volumeName, newlyMappedInitiators)
 			return -1, status.Errorf(codes.AlreadyExists, "mapping failed: returnCode=%d response=%s", respStatus.ReturnCode, respStatus.Response)
